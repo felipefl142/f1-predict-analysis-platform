@@ -68,16 +68,18 @@ def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2):
     df_oot = df[df["year"] == oot_year].copy()
     df_analytics = df[df["year"] < oot_year].copy()
 
-    # Remove last 4 rounds per year to avoid late-season label leakage
+    # Remove last 4 rounds per year to avoid late-season label leakage.
+    # Skip when there is only 1 round per year (pre-season snapshot ABTs).
     df_year_round = df_analytics[["year", "dt_ref"]].drop_duplicates()
-    df_year_round["row_number"] = (
-        df_year_round.sort_values("dt_ref", ascending=False)
-        .groupby("year")
-        .cumcount()
-    )
-    df_year_round = df_year_round[df_year_round["row_number"] > 4]
-    df_year_round = df_year_round.drop("row_number", axis=1)
-    df_analytics = df_analytics.merge(df_year_round, how="inner")
+    if df_year_round.groupby("year").size().max() > 5:
+        df_year_round["row_number"] = (
+            df_year_round.sort_values("dt_ref", ascending=False)
+            .groupby("year")
+            .cumcount()
+        )
+        df_year_round = df_year_round[df_year_round["row_number"] > 4]
+        df_year_round = df_year_round.drop("row_number", axis=1)
+        df_analytics = df_analytics.merge(df_year_round, how="inner")
 
     entity_target = (
         df_analytics[id_cols + ["year", target_col]]
@@ -105,18 +107,25 @@ def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2):
 def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
                    y_oot=None, y_oot_prob=None):
     """Plot ROC curves and log to MLFlow."""
+    if len(np.unique(y_train)) < 2:
+        return None, None, None
     auc_train = metrics.roc_auc_score(y_train, y_train_prob)
     roc_train = metrics.roc_curve(y_train, y_train_prob)
     mlflow.log_metric("auc_train", auc_train)
 
-    auc_test = metrics.roc_auc_score(y_test, y_test_prob)
-    roc_test = metrics.roc_curve(y_test, y_test_prob)
-    mlflow.log_metric("auc_test", auc_test)
+    if len(np.unique(y_test)) < 2:
+        auc_test, roc_test = None, None
+    else:
+        auc_test = metrics.roc_auc_score(y_test, y_test_prob)
+        roc_test = metrics.roc_curve(y_test, y_test_prob)
+        mlflow.log_metric("auc_test", auc_test)
 
     plt.figure(dpi=100)
     plt.plot(roc_train[0], roc_train[1])
-    plt.plot(roc_test[0], roc_test[1])
-    legend = [f"Train: {auc_train:.4f}", f"Test: {auc_test:.4f}"]
+    legend = [f"Train: {auc_train:.4f}"]
+    if roc_test is not None:
+        plt.plot(roc_test[0], roc_test[1])
+        legend.append(f"Test: {auc_test:.4f}")
 
     auc_oot = None
     if y_oot is not None and y_oot_prob is not None and len(np.unique(y_oot)) > 1:
@@ -146,10 +155,20 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
 
 def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS):
     """Run stratified K-fold CV and return mean/std AUC scores."""
+    # Cap folds so each validation fold has at least one positive example
+    n_positives = int(y.sum())
+    n_folds = min(n_folds, max(2, n_positives))
     cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    # CatBoost GPU manages its own parallelism; running folds in parallel causes
+    # multiple workers to compete for VRAM and OOM-abort. Use n_jobs=1 for GPU models.
+    model = pipeline.named_steps.get("model")
+    uses_gpu = getattr(model, "task_type", None) == "GPU"
+    n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
-        pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=-1, error_score=0.0,
+        pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs, error_score=0.0,
     )
+    # NaN occurs when a validation fold has only one class; treat as random (0.5)
+    cv_scores = np.where(np.isnan(cv_scores), 0.5, cv_scores)
     return cv_scores.mean(), cv_scores.std(), cv_scores
 
 
@@ -162,7 +181,7 @@ def _suggest_params(trial, model_name, balanced=False):
     if model_name == "LogisticRegression":
         return {
             "model__C": trial.suggest_float("C", 1e-4, 100, log=True),
-            "model__penalty": trial.suggest_categorical("penalty", ["l1", "l2"]),
+            "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
             "model__solver": "saga",
         }
     elif model_name in ("RandomForest", "BalancedRandomForest"):
@@ -208,7 +227,10 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=F
     Returns:
         (best_pipeline, best_params, best_cv_auc)
     """
-    cv = model_selection.StratifiedKFold(n_splits=N_CV_FOLDS, shuffle=True, random_state=42)
+    # Cap folds so each validation fold has at least one positive example
+    n_positives = int(y.sum())
+    n_folds = min(N_CV_FOLDS, max(2, n_positives))
+    cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     def objective(trial):
         params = _suggest_params(trial, model_name, balanced)
@@ -226,7 +248,12 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=F
 
             cloned.fit(X_fold_train, y_fold_train)
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
-            fold_auc = metrics.roc_auc_score(y_fold_val, y_pred)
+            if y_fold_val.nunique() < 2:
+                # Validation fold has only one class; treat as random performance
+                fold_auc = 0.5
+            else:
+                fold_auc = metrics.roc_auc_score(y_fold_val, y_pred)
+
             scores.append(fold_auc)
 
             # Report intermediate value for pruning
@@ -243,13 +270,22 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=F
     )
     study.optimize(objective, n_trials=n_trials)
 
+    try:
+        best_raw_params = study.best_params
+        best_cv_auc = study.best_value
+    except ValueError:
+        # All trials failed (e.g. dataset too small); fall back to default params
+        print(f"    Warning: all Optuna trials failed for {model_name}; using default params.")
+        pipeline.fit(X, y)
+        return pipeline, {}, 0.0
+
     # Build best pipeline
-    best_params = _suggest_params_from_dict(study.best_params, model_name, balanced)
+    best_params = _suggest_params_from_dict(best_raw_params, model_name, balanced)
     best_pipeline = clone(pipeline)
     best_pipeline.set_params(**best_params)
     best_pipeline.fit(X, y)
 
-    return best_pipeline, study.best_params, study.best_value
+    return best_pipeline, best_raw_params, best_cv_auc
 
 
 def _suggest_params_from_dict(params_dict, model_name, balanced=False):

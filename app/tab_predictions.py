@@ -33,6 +33,13 @@ def _get_champion_predictions():
 
 
 @st.cache_data(ttl=3600)
+def _get_champion_season(year):
+    from ml.predict import predict_champion_season
+    model, _ = _load_champion_model()
+    return predict_champion_season(year, model)
+
+
+@st.cache_data(ttl=3600)
 def _get_team_predictions():
     from ml.predict import predict_teams
     model, _ = _load_team_model()
@@ -78,26 +85,40 @@ def _render_champion_predictions():
         st.info("Make sure you've run the ETL pipeline and trained the models first.")
         return
 
-    # Year filter
-    years = sorted(data["year"].unique(), reverse=True)
-    selected_years = st.multiselect("Season", years, default=[years[0]] if years else [])
-    if not selected_years:
-        st.warning("Select at least one season.")
-        return
+    # Season selector — uses prediction_year (the year being predicted, not stats year)
+    years = sorted(data["prediction_year"].unique(), reverse=True)
+    selected_year = st.selectbox("Season", years, index=0)
 
-    data_filtered = data[data["year"].isin(selected_years)]
+    # For the selected year, offer in-season view if available
+    current_year = pd.Timestamp.now().year
+    if selected_year >= current_year:
+        view_mode = st.radio(
+            "Prediction mode",
+            ["Pre-season (based on prior year stats)", "Current (latest available data)"],
+            horizontal=True,
+        )
+        if view_mode.startswith("Current"):
+            try:
+                season_data = _get_champion_season(selected_year)
+                as_of = pd.to_datetime(season_data["data_as_of"].max()).strftime("%b %d, %Y")
+                st.caption(f"Data as of: {as_of}. Run `etl.collect --years {selected_year - 1} {selected_year}` + `etl.silver` to update.")
+                _render_champion_bar(season_data, selected_year)
+            except Exception as e:
+                st.error(f"Could not load current-season data: {e}")
+            with st.expander("Model Comparison"):
+                _render_model_comparison_table("f1_champion")
+            return
 
-    # Get top 3 drivers by latest probability as defaults
-    latest = data_filtered[data_filtered["dt_ref"] == data_filtered["dt_ref"].max()]
-    top3 = latest.nlargest(3, "prob_champion")["driverid"].tolist()
+    data_year = data[data["prediction_year"] == selected_year]
 
-    drivers = sorted(data_filtered["driverid"].unique())
+    drivers = sorted(data_year["driverid"].unique())
     driver_names = (
-        data_filtered[["driverid", "full_name"]]
+        data_year[["driverid", "full_name"]]
         .drop_duplicates()
         .set_index("driverid")["full_name"]
         .to_dict()
     )
+    top3 = data_year.nlargest(3, "prob_champion")["driverid"].tolist()
     default_drivers = [d for d in top3 if d in drivers]
     selected_drivers = st.multiselect(
         "Drivers",
@@ -105,63 +126,57 @@ def _render_champion_predictions():
         default=default_drivers,
         format_func=lambda x: driver_names.get(x, x),
     )
-
     if not selected_drivers:
         st.warning("Select at least one driver.")
         return
 
-    plot_data = data_filtered[data_filtered["driverid"].isin(selected_drivers)]
+    plot_data = data_year[data_year["driverid"].isin(selected_drivers)]
 
-    # Build color map
+    # Since each driver has one pre-season point per year, show a bar chart
+    _render_champion_bar(plot_data, selected_year)
+
+    with st.expander("Model Comparison"):
+        _render_model_comparison_table("f1_champion")
+
+
+def _render_champion_bar(data, year):
+    """Bar chart of championship win probabilities for a single season."""
+    plot = data.sort_values("prob_champion", ascending=False)
     color_map = {}
-    for _, row in plot_data[["driverid", "team_color"]].drop_duplicates().iterrows():
-        color_map[row["driverid"]] = get_team_color(None, row["team_color"])
+    for _, row in plot[["driverid", "team_color"]].drop_duplicates().iterrows():
+        color_map[row.get("full_name", row["driverid"])] = get_team_color(None, row.get("team_color"))
 
-    # Line chart
-    fig = px.line(
-        plot_data,
-        x="dt_ref",
+    name_col = "full_name" if "full_name" in plot.columns else "driverid"
+    fig = px.bar(
+        plot,
+        x=name_col,
         y="prob_champion",
-        color="full_name",
-        color_discrete_map={
-            driver_names.get(d, d): color_map.get(d, "#999")
-            for d in selected_drivers
-        },
-        labels={
-            "dt_ref": "Post-Race Date",
-            "prob_champion": "Championship Win Probability",
-            "full_name": "Driver",
-        },
-        title="Championship Win Probability Over Time",
+        color=name_col,
+        color_discrete_map=color_map,
+        labels={name_col: "Driver", "prob_champion": "Championship Win Probability"},
+        title=f"{year} Championship Win Probability (pre-season model)",
     )
-    fig.update_layout(yaxis_tickformat=".0%", hovermode="x unified")
+    fig.update_layout(yaxis_tickformat=".0%", showlegend=False, xaxis_tickangle=-30)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Table
-    pivot = plot_data.pivot_table(
-        index="dt_ref", columns="full_name", values="prob_champion"
-    ).reset_index()
     st.dataframe(
-        pivot.style.format(
-            {c: "{:.2%}" for c in pivot.columns if c != "dt_ref"}
-        ),
+        plot[[name_col, "prob_champion"]].style.format({"prob_champion": "{:.2%}"}),
         use_container_width=True,
     )
 
-    # Model comparison expander
-    with st.expander("Model Comparison"):
-        comp = _get_model_comparison("f1_champion")
-        if not comp.empty:
-            st.dataframe(
-                comp.style.format({
-                    "auc_train": "{:.4f}",
-                    "auc_test": "{:.4f}",
-                    "auc_oot": "{:.4f}",
-                }),
-                use_container_width=True,
-            )
-        else:
-            st.info("No model comparison data available.")
+
+def _render_model_comparison_table(experiment_name):
+    comp = _get_model_comparison(experiment_name)
+    if not comp.empty:
+        st.dataframe(
+            comp.style.format({
+                c: "{:.4f}" for c in ["auc_train", "auc_test", "auc_oot",
+                                      "cv_auc", "tuned_cv_auc"] if c in comp.columns
+            }),
+            use_container_width=True,
+        )
+    else:
+        st.info("No model comparison data available.")
 
 
 def _render_team_predictions():
@@ -174,11 +189,10 @@ def _render_team_predictions():
         st.info("Make sure you've run the ETL pipeline and trained the models first.")
         return
 
-    data["year"] = pd.to_datetime(data["dt_ref"]).dt.year
-    years = sorted(data["year"].unique(), reverse=True)
+    years = sorted(data["prediction_year"].unique(), reverse=True)
     selected_year = st.selectbox("Season", years, index=0)
 
-    year_data = data[data["year"] == selected_year]
+    year_data = data[data["prediction_year"] == selected_year]
     latest = year_data[year_data["dt_ref"] == year_data["dt_ref"].max()]
     latest = latest.sort_values("prob_constructor_champion", ascending=False)
 
@@ -204,9 +218,7 @@ def _render_team_predictions():
     )
 
     with st.expander("Model Comparison"):
-        comp = _get_model_comparison("f1_constructor_champion")
-        if not comp.empty:
-            st.dataframe(comp, use_container_width=True)
+        _render_model_comparison_table("f1_constructor_champion")
 
 
 def _render_departure_predictions():
