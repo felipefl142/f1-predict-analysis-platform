@@ -36,6 +36,10 @@ python -m ml.champion_model
 python -m ml.team_model
 python -m ml.departure_model
 
+# Evaluate TimesFM zero-shot forecasts (logs to same MLflow experiments for comparison)
+.venv-timesfm/bin/python -m ml.evaluate_timesfm                 # all 3 targets
+.venv-timesfm/bin/python -m ml.evaluate_timesfm champion        # champion | constructor | departure
+
 # Run Streamlit app
 streamlit run app/main.py
 
