@@ -1,4 +1,8 @@
-"""Load best models and generate predictions. Used by Streamlit app."""
+"""Load best models and generate time-series predictions. Used by Streamlit app.
+
+All predict_* functions return one row per (entity, race_date) for the given
+season, enabling line charts that show how probabilities evolve race by race.
+"""
 
 import os
 
@@ -69,20 +73,10 @@ def get_model_comparison(experiment_name):
     return pd.DataFrame(records)
 
 
-def predict_champions(model=None):
-    """Generate champion probabilities from the gold ABT (all historical seasons).
-
-    Each row represents a driver's pre-season snapshot for the following year.
-    prediction_year = dt_ref.year + 1 (e.g., 2025 stats → 2026 prediction).
-    """
-    if model is None:
-        model, _ = load_best_model("f1_champion")
-
+def _driver_meta():
+    """Latest name/team per driver from bronze."""
     con = duckdb.connect()
-    abt = con.execute(
-        f"SELECT * FROM read_parquet('{os.path.join(GOLD_DIR, 'abt_champions.parquet')}')"
-    ).fetchdf()
-    driver_latest = con.execute(f"""
+    df = con.execute(f"""
         SELECT driverid, full_name, team_name, team_color
         FROM (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
@@ -91,125 +85,168 @@ def predict_champions(model=None):
         WHERE rn = 1
     """).fetchdf()
     con.close()
-
-    features = [c for c in abt.columns if c not in
-                {"dt_ref", "driverid", "year", "fl_champion"}]
-    abt["prob_champion"] = model.predict_proba(abt[features])[:, 1]
-
-    result = abt[["dt_ref", "driverid", "prob_champion"]].merge(
-        driver_latest, on="driverid", how="left"
-    )
-    # prediction_year is the season being predicted (stats year + 1)
-    result["prediction_year"] = pd.to_datetime(result["dt_ref"]).dt.year + 1
-    return result
+    return df
 
 
-def predict_champion_season(year, model=None):
-    """Predict 2026+ champion probabilities that update as the season progresses.
+_ALWAYS_EXCLUDE = {
+    "dt_ref", "driverid", "teamid", "team_name", "year",
+    "fl_champion", "fl_constructor_champion", "fl_departed",
+    "prediction_year", "data_as_of", "season_race_number",
+    "season_total_races", "season_fraction",
+}
 
-    Uses the most recent available features per driver from silver:
-    - Before any races are collected: end-of-prior-year stats (pure pre-season)
-    - After running etl.collect --years {year} + etl.silver: mid-season stats
 
-    This lets the prediction update race-by-race as new data is collected.
-    The model was trained on end-of-season snapshots so treat mid-season values
-    as directional rather than calibrated probabilities.
+def _feature_cols(df, *extra_exclude):
+    return [c for c in df.columns if c not in _ALWAYS_EXCLUDE | set(extra_exclude)]
+
+
+# ---------------------------------------------------------------------------
+# Champion predictions
+# ---------------------------------------------------------------------------
+
+def predict_champions(year: int, model=None) -> pd.DataFrame:
+    """Race-by-race championship win probabilities for all drivers in `year`.
+
+    Returns one row per (driverid, dt_ref) sorted by date then probability.
+    Falls back to the prior season's last snapshot if no in-season data exists.
     """
     if model is None:
         model, _ = load_best_model("f1_champion")
 
     con = duckdb.connect()
+    silver = os.path.join(SILVER_DIR, "fs_driver_all.parquet")
 
-    # Get all available feature rows for this prediction year:
-    # either from the prior year (pre-season) or from the current year (in-season)
-    features_df = con.execute(f"""
-        SELECT f.*
-        FROM read_parquet('{os.path.join(SILVER_DIR, "fs_driver_all.parquet")}') f
-        WHERE EXTRACT(YEAR FROM f.dt_ref)::INT <= {year - 1}
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY f.driverid, EXTRACT(YEAR FROM f.dt_ref)::INT
-            ORDER BY f.dt_ref DESC
-        ) = 1
-        AND EXTRACT(YEAR FROM f.dt_ref)::INT = (
-            SELECT MAX(EXTRACT(YEAR FROM dt_ref)::INT)
-            FROM read_parquet('{os.path.join(SILVER_DIR, "fs_driver_all.parquet")}')
-            WHERE EXTRACT(YEAR FROM dt_ref)::INT <= {year - 1}
-        )
-    """).fetchdf()
+    in_season_count = con.execute(f"""
+        SELECT COUNT(*) FROM read_parquet('{silver}')
+        WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
+    """).fetchone()[0]
 
-    driver_latest = con.execute(f"""
-        SELECT driverid, full_name, team_name, team_color
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
-            FROM read_parquet('{BRONZE_PATH}')
-        )
-        WHERE rn = 1
-    """).fetchdf()
+    if in_season_count > 0:
+        race_cal = con.execute(f"""
+            SELECT event_date AS dt_ref,
+                   ROW_NUMBER() OVER (ORDER BY event_date) AS season_race_number,
+                   COUNT(*) OVER () AS season_total_races
+            FROM (SELECT DISTINCT event_date FROM read_parquet('{BRONZE_PATH}')
+                  WHERE mode IN ('Race','Sprint Race','Sprint') AND year = {year})
+        """).fetchdf()
+        features_df = con.execute(f"""
+            SELECT f.* FROM read_parquet('{silver}') f
+            WHERE EXTRACT(YEAR FROM f.dt_ref)::INT = {year}
+        """).fetchdf()
+    else:
+        race_cal = con.execute(f"""
+            SELECT event_date AS dt_ref,
+                   ROW_NUMBER() OVER (ORDER BY event_date) AS season_race_number,
+                   COUNT(*) OVER () AS season_total_races
+            FROM (SELECT DISTINCT event_date FROM read_parquet('{BRONZE_PATH}')
+                  WHERE mode IN ('Race','Sprint Race','Sprint') AND year = {year - 1})
+        """).fetchdf()
+        features_df = con.execute(f"""
+            SELECT f.* FROM read_parquet('{silver}') f
+            WHERE EXTRACT(YEAR FROM f.dt_ref)::INT = {year - 1}
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY f.driverid ORDER BY f.dt_ref DESC) = 1
+        """).fetchdf()
+
     con.close()
 
-    _EXCLUDE = {"dt_ref", "driverid", "fl_champion", "fl_constructor_champion", "fl_departed"}
-    feature_cols = [c for c in features_df.columns if c not in _EXCLUDE]
+    features_df = features_df.merge(race_cal, on="dt_ref", how="left")
+    features_df["season_fraction"] = (
+        features_df["season_race_number"] / features_df["season_total_races"]
+    ).round(3)
 
-    features_df["prob_champion"] = model.predict_proba(features_df[feature_cols])[:, 1]
-    features_df["prediction_year"] = year
-    features_df["data_as_of"] = features_df["dt_ref"]
+    feat_cols = _feature_cols(features_df)
+    features_df["prob_champion"] = model.predict_proba(features_df[feat_cols])[:, 1]
 
-    result = features_df[["dt_ref", "driverid", "prob_champion", "prediction_year", "data_as_of"]].merge(
-        driver_latest, on="driverid", how="left"
+    result = features_df[["dt_ref", "driverid", "prob_champion",
+                           "season_race_number", "season_fraction"]].merge(
+        _driver_meta(), on="driverid", how="left"
     )
-    return result.sort_values("prob_champion", ascending=False)
+    result["year"] = year
+    return result.sort_values(["dt_ref", "prob_champion"], ascending=[True, False])
 
 
-def predict_teams(model=None):
-    """Generate constructor champion probabilities from the gold ABT.
+# ---------------------------------------------------------------------------
+# Team predictions
+# ---------------------------------------------------------------------------
 
-    prediction_year = dt_ref.year + 1 (e.g., 2025 stats → 2026 prediction).
+def predict_teams(year: int, model=None) -> pd.DataFrame:
+    """Race-by-race constructor championship probabilities for all teams in `year`.
+
+    Returns one row per (teamid, dt_ref).
+    Falls back to prior season snapshot if no in-season data exists.
     """
     if model is None:
         model, _ = load_best_model("f1_constructor_champion")
 
     con = duckdb.connect()
-    abt = con.execute(
-        f"SELECT * FROM read_parquet('{os.path.join(GOLD_DIR, 'abt_teams.parquet')}')"
-    ).fetchdf()
+    abt_path = os.path.join(GOLD_DIR, "abt_teams_inseason.parquet")
+
+    in_season_count = con.execute(f"""
+        SELECT COUNT(*) FROM read_parquet('{abt_path}')
+        WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
+    """).fetchone()[0]
+
+    if in_season_count > 0:
+        abt = con.execute(f"""
+            SELECT * FROM read_parquet('{abt_path}')
+            WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
+        """).fetchdf()
+    else:
+        abt = con.execute(f"""
+            SELECT * FROM read_parquet('{abt_path}')
+            WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year - 1}
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY teamid ORDER BY dt_ref DESC) = 1
+        """).fetchdf()
+
     con.close()
 
-    features = [c for c in abt.columns if c not in
-                {"dt_ref", "teamid", "team_name", "year", "fl_constructor_champion",
-                 "num_drivers"}]
-    abt["prob_constructor_champion"] = model.predict_proba(abt[features])[:, 1]
-    abt["prediction_year"] = pd.to_datetime(abt["dt_ref"]).dt.year + 1
+    feat_cols = _feature_cols(abt, "num_drivers")
+    abt["prob_constructor_champion"] = model.predict_proba(abt[feat_cols])[:, 1]
+    abt["year"] = year
 
-    return abt[["dt_ref", "teamid", "team_name", "prob_constructor_champion", "prediction_year"]]
+    return abt[["dt_ref", "teamid", "team_name",
+                "prob_constructor_champion",
+                "season_race_number", "season_fraction", "year"]].sort_values(
+        ["dt_ref", "prob_constructor_champion"], ascending=[True, False]
+    )
 
 
-def predict_departures(model=None):
-    """Generate driver departure probabilities."""
+# ---------------------------------------------------------------------------
+# Departure predictions
+# ---------------------------------------------------------------------------
+
+def predict_departures(year: int | None = None, model=None) -> pd.DataFrame:
+    """Race-by-race departure probabilities for all drivers in `year`.
+
+    Defaults to the most recent complete season if year is None.
+    Returns one row per (driverid, dt_ref).
+    """
     if model is None:
         model, _ = load_best_model("f1_departure")
 
     con = duckdb.connect()
-    abt = con.execute(
-        f"SELECT * FROM read_parquet('{os.path.join(GOLD_DIR, 'abt_departures.parquet')}')"
-    ).fetchdf()
+    abt_path = os.path.join(GOLD_DIR, "abt_departures_inseason.parquet")
 
-    driver_latest = con.execute(f"""
-        SELECT driverid, full_name, team_name, team_color
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
-            FROM read_parquet('{BRONZE_PATH}')
-        )
-        WHERE rn = 1
+    if year is None:
+        year = con.execute(f"""
+            SELECT MAX(EXTRACT(YEAR FROM dt_ref)::INT) FROM read_parquet('{abt_path}')
+        """).fetchone()[0]
+
+    abt = con.execute(f"""
+        SELECT * FROM read_parquet('{abt_path}')
+        WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
     """).fetchdf()
     con.close()
 
-    features = [c for c in abt.columns if c not in
-                {"dt_ref", "driverid", "year", "fl_departed"}]
-    X = abt[features]
-    abt["prob_departure"] = model.predict_proba(X)[:, 1]
+    if abt.empty:
+        return pd.DataFrame()
 
-    result = abt[["dt_ref", "driverid", "prob_departure"]].merge(
-        driver_latest, on="driverid", how="left"
+    feat_cols = _feature_cols(abt)
+    abt["prob_departure"] = model.predict_proba(abt[feat_cols])[:, 1]
+
+    result = abt[["dt_ref", "driverid", "prob_departure",
+                  "season_race_number", "season_fraction"]].merge(
+        _driver_meta(), on="driverid", how="left"
     )
-    result["year"] = pd.to_datetime(result["dt_ref"]).dt.year
-    return result
+    result["year"] = year
+    return result.sort_values(["dt_ref", "prob_departure"], ascending=[True, False])

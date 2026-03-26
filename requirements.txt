@@ -14,3 +14,6 @@ plotly>=5.24.0
 matplotlib>=3.9.0
 python-dotenv>=1.0.0
 tqdm>=4.67.0
+
+# Optional: TimesFM zero-shot time series forecasting (requires Python 3.10–3.11)
+# pip install timesfm==1.0.0   (in a Python 3.10/3.11 venv)

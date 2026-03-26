@@ -13,23 +13,24 @@ CHAMPIONS_CSV = os.path.join(BASE_DIR, "data", "champions.csv")
 CONSTRUCTORS_CSV = os.path.join(BASE_DIR, "data", "constructors_champions.csv")
 
 ABTS = {
-    "abt_champions": {
-        "sql_file": "abt_champions.sql",
+    "abt_champions_inseason": {
+        "sql_file": "abt_champions_inseason.sql",
         "replacements": {
             "{silver_dir}": SILVER_DIR,
+            "{bronze_path}": BRONZE_PATH,
             "{champions_csv}": CHAMPIONS_CSV,
         },
     },
-    "abt_teams": {
-        "sql_file": "abt_teams.sql",
+    "abt_teams_inseason": {
+        "sql_file": "abt_teams_inseason.sql",
         "replacements": {
             "{silver_dir}": SILVER_DIR,
             "{bronze_path}": BRONZE_PATH,
             "{constructors_csv}": CONSTRUCTORS_CSV,
         },
     },
-    "abt_departures": {
-        "sql_file": "abt_departures.sql",
+    "abt_departures_inseason": {
+        "sql_file": "abt_departures_inseason.sql",
         "replacements": {
             "{silver_dir}": SILVER_DIR,
             "{bronze_path}": BRONZE_PATH,

@@ -1,4 +1,8 @@
-"""Train and compare batch + online models for F1 champion prediction."""
+"""Train and compare batch + online models for F1 champion prediction.
+
+Uses the in-season ABT (one row per driver per race) so predictions can be
+plotted as a time series evolving race by race through the season.
+"""
 
 import os
 
@@ -8,12 +12,12 @@ from ml.model_selection import get_batch_models, get_online_models
 from ml.utils import train_and_compare_batch, train_and_compare_online
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
-ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_champions.parquet")
+ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_champions_inseason.parquet")
 
 
 def train_champion_models():
     print("=" * 60)
-    print("F1 Champion Prediction — Multi-Model Training")
+    print("F1 Champion Prediction — Multi-Model Training (in-season ABT)")
     print("=" * 60)
 
     con = duckdb.connect()
@@ -33,6 +37,7 @@ def train_champion_models():
         experiment_name="f1_champion",
         candidates=batch_candidates,
         balanced=False,
+        remove_late_rounds=False,
     )
 
     # --- Online models ---
@@ -44,6 +49,7 @@ def train_champion_models():
         id_cols=["driverid"],
         experiment_name="f1_champion",
         candidates=online_candidates,
+        remove_late_rounds=False,
     )
 
     print(f"\nDone. Best batch: {best_batch} | Best online: {best_online}")
