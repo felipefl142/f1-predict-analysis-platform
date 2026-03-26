@@ -16,7 +16,8 @@ from sklearn import clone, metrics, model_selection
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
-MLFLOW_DIR = os.path.join(BASE_DIR, "mlruns")
+MLFLOW_DIR = os.path.join(BASE_DIR, "mlruns")          # artifact storage
+MLFLOW_DB = f"sqlite:///{os.path.join(BASE_DIR, 'mlflow.db')}"  # metadata store
 
 N_CV_FOLDS = 5
 N_OPTUNA_TRIALS = 30
@@ -24,8 +25,7 @@ N_OPTUNA_TRIALS = 30
 
 def setup_mlflow(experiment_name):
     """Set up local MLFlow tracking and return the experiment."""
-    tracking_uri = f"file://{os.path.abspath(MLFLOW_DIR)}"
-    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_tracking_uri(MLFLOW_DB)
     mlflow.set_experiment(experiment_name)
     return mlflow.get_experiment_by_name(experiment_name)
 
@@ -35,7 +35,8 @@ def get_feature_columns(df, exclude_cols=None):
     if exclude_cols is None:
         exclude_cols = []
     always_exclude = {"dt_ref", "driverid", "year", "teamid", "team_name",
-                      "fl_champion", "fl_constructor_champion", "fl_departed"}
+                      "fl_champion", "fl_constructor_champion", "fl_departed",
+                      "prediction_year", "data_as_of"}
     exclude = always_exclude | set(exclude_cols)
     return [c for c in df.columns if c not in exclude]
 
@@ -53,7 +54,7 @@ def _find_oot_year(df, target_col):
     return int(df_temp["year"].max())
 
 
-def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2):
+def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2, remove_late_rounds=True):
     """Split into train/test/OOT sets with stratification.
 
     Auto-detects OOT year as the most recent year with both classes.
@@ -69,9 +70,10 @@ def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2):
     df_analytics = df[df["year"] < oot_year].copy()
 
     # Remove last 4 rounds per year to avoid late-season label leakage.
-    # Skip when there is only 1 round per year (pre-season snapshot ABTs).
+    # Skipped for in-season models (remove_late_rounds=False) and when there
+    # is only 1 round per year (pre-season snapshot ABTs).
     df_year_round = df_analytics[["year", "dt_ref"]].drop_duplicates()
-    if df_year_round.groupby("year").size().max() > 5:
+    if remove_late_rounds and df_year_round.groupby("year").size().max() > 5:
         df_year_round["row_number"] = (
             df_year_round.sort_values("dt_ref", ascending=False)
             .groupby("year")
@@ -306,7 +308,7 @@ def _suggest_params_from_dict(params_dict, model_name, balanced=False):
 # ---------------------------------------------------------------------------
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
-                            oot_year=None, balanced=False):
+                            oot_year=None, balanced=False, remove_late_rounds=True):
     """Train all batch models with cross-validation and Optuna hyperparameter tuning.
 
     For each model:
@@ -322,6 +324,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     features = get_feature_columns(df, exclude_cols=id_cols)
     df_train, df_test, df_oot, oot_year = split_data(
         df, target_col, id_cols, oot_year,
+        remove_late_rounds=remove_late_rounds,
     )
 
     X_train, y_train = df_train[features], df_train[target_col]
@@ -332,81 +335,82 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     for name, pipeline in candidates.items():
         print(f"\n  [BATCH] Training {name}...")
+        try:
+            with mlflow.start_run(run_name=f"batch_{name}"):
+                mlflow.log_param("model_type", name)
+                mlflow.log_param("learning_mode", "batch")
+                mlflow.log_param("tuning_method", "optuna_tpe")
+                mlflow.log_param("n_features", len(features))
+                mlflow.log_param("n_train_rows", len(X_train))
+                mlflow.log_param("n_test_rows", len(X_test))
+                mlflow.log_param("n_oot_rows", len(X_oot))
+                mlflow.log_param("oot_year", oot_year)
 
-        with mlflow.start_run(run_name=f"batch_{name}"):
-            mlflow.log_param("model_type", name)
-            mlflow.log_param("learning_mode", "batch")
-            mlflow.log_param("tuning_method", "optuna_tpe")
-            mlflow.log_param("n_features", len(features))
-            mlflow.log_param("n_train_rows", len(X_train))
-            mlflow.log_param("n_test_rows", len(X_test))
-            mlflow.log_param("n_oot_rows", len(X_oot))
-            mlflow.log_param("oot_year", oot_year)
+                # --- Step 1: CV with default params ---
+                print(f"    CV ({N_CV_FOLDS}-fold) default params...")
+                cv_mean, cv_std, cv_scores = cross_validate_model(pipeline, X_train, y_train)
+                mlflow.log_metric("cv_auc_mean", cv_mean)
+                mlflow.log_metric("cv_auc_std", cv_std)
+                for i, score in enumerate(cv_scores):
+                    mlflow.log_metric(f"cv_fold_{i}", score)
+                print(f"    Default CV AUC: {cv_mean:.4f} (+/- {cv_std:.4f})")
 
-            # --- Step 1: CV with default params ---
-            print(f"    CV ({N_CV_FOLDS}-fold) default params...")
-            cv_mean, cv_std, cv_scores = cross_validate_model(pipeline, X_train, y_train)
-            mlflow.log_metric("cv_auc_mean", cv_mean)
-            mlflow.log_metric("cv_auc_std", cv_std)
-            for i, score in enumerate(cv_scores):
-                mlflow.log_metric(f"cv_fold_{i}", score)
-            print(f"    Default CV AUC: {cv_mean:.4f} (+/- {cv_std:.4f})")
+                # --- Step 2: Optuna tuning ---
+                print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
+                tuned_pipeline, best_params, tuned_cv_auc = optuna_tune(
+                    pipeline, X_train, y_train, name,
+                    n_trials=N_OPTUNA_TRIALS, balanced=balanced,
+                )
 
-            # --- Step 2: Optuna tuning ---
-            has_search_space = _suggest_params.__code__.co_varnames  # always true, but check model
-            print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
-            tuned_pipeline, best_params, tuned_cv_auc = optuna_tune(
-                pipeline, X_train, y_train, name,
-                n_trials=N_OPTUNA_TRIALS, balanced=balanced,
-            )
+                if tuned_cv_auc > cv_mean:
+                    pipeline = tuned_pipeline
+                    print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
+                else:
+                    tuned_cv_auc = cv_mean
+                    pipeline.fit(X_train, y_train)
+                    best_params = {}
+                    print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")
 
-            if tuned_cv_auc > cv_mean:
-                pipeline = tuned_pipeline
-                print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
-            else:
-                # Default was better, refit with defaults
-                tuned_cv_auc = cv_mean
-                pipeline.fit(X_train, y_train)
-                best_params = {}
-                print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")
+                mlflow.log_metric("tuned_cv_auc", tuned_cv_auc)
+                for param_key, param_val in best_params.items():
+                    mlflow.log_param(f"best_{param_key}", param_val)
 
-            mlflow.log_metric("tuned_cv_auc", tuned_cv_auc)
-            for param_key, param_val in best_params.items():
-                mlflow.log_param(f"best_{param_key}", param_val)
+                # --- Step 3: Evaluate on test + OOT ---
+                y_train_prob = pipeline.predict_proba(X_train)[:, 1]
+                y_test_prob = pipeline.predict_proba(X_test)[:, 1]
+                y_oot_prob = pipeline.predict_proba(X_oot)[:, 1] if len(X_oot) > 0 else None
 
-            # --- Step 3: Evaluate on test + OOT ---
-            y_train_prob = pipeline.predict_proba(X_train)[:, 1]
-            y_test_prob = pipeline.predict_proba(X_test)[:, 1]
-            y_oot_prob = pipeline.predict_proba(X_oot)[:, 1] if len(X_oot) > 0 else None
+                auc_train, auc_test, auc_oot = log_roc_curves(
+                    y_train, y_train_prob,
+                    y_test, y_test_prob,
+                    y_oot if y_oot_prob is not None else None,
+                    y_oot_prob,
+                )
 
-            auc_train, auc_test, auc_oot = log_roc_curves(
-                y_train, y_train_prob,
-                y_test, y_test_prob,
-                y_oot if y_oot_prob is not None else None,
-                y_oot_prob,
-            )
+                # Log feature importances if available
+                model_step = pipeline.named_steps.get("model")
+                if hasattr(model_step, "feature_importances_"):
+                    fi = pd.Series(model_step.feature_importances_, index=features)
+                    fi = fi.sort_values(ascending=False)
+                    fi_path = "/tmp/feature_importances.md"
+                    fi.head(30).to_markdown(fi_path)
+                    mlflow.log_artifact(fi_path)
 
-            # Log feature importances if available
-            model_step = pipeline.named_steps.get("model")
-            if hasattr(model_step, "feature_importances_"):
-                fi = pd.Series(model_step.feature_importances_, index=features)
-                fi = fi.sort_values(ascending=False)
-                fi_path = "/tmp/feature_importances.md"
-                fi.head(30).to_markdown(fi_path)
-                mlflow.log_artifact(fi_path)
+                mlflow.sklearn.log_model(pipeline, artifact_path="model")
 
-            mlflow.sklearn.log_model(pipeline, artifact_path="model")
-
-            results.append({
-                "model": name,
-                "mode": "batch",
-                "cv_auc": cv_mean,
-                "tuned_cv_auc": tuned_cv_auc,
-                "auc_train": auc_train,
-                "auc_test": auc_test,
-                "auc_oot": auc_oot,
-                "run_id": mlflow.active_run().info.run_id,
-            })
+                results.append({
+                    "model": name,
+                    "mode": "batch",
+                    "cv_auc": cv_mean,
+                    "tuned_cv_auc": tuned_cv_auc,
+                    "auc_train": auc_train,
+                    "auc_test": auc_test,
+                    "auc_oot": auc_oot,
+                    "run_id": mlflow.active_run().info.run_id,
+                })
+        except Exception as e:
+            print(f"    SKIPPED: {name} failed with error: {type(e).__name__}: {e}")
+            continue
 
     comparison = pd.DataFrame(results)
 
@@ -451,8 +455,19 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 def _train_sklearn_online(pipeline, X_train, y_train, X_test, y_test,
                           X_oot, y_oot, features, classes):
     """Train an sklearn model with partial_fit, simulating streaming data."""
+    from sklearn.utils.class_weight import compute_class_weight
+
     scaler = pipeline.named_steps["scaler"]
     model = pipeline.named_steps["model"]
+
+    # partial_fit does not accept class_weight='balanced'; convert to sample weights
+    if getattr(model, "class_weight", None) == "balanced":
+        model.set_params(class_weight=None)
+        cw = compute_class_weight("balanced", classes=classes, y=y_train)
+        weight_map = dict(zip(classes, cw))
+        sample_weights = y_train.map(weight_map).values
+    else:
+        sample_weights = None
 
     X_train_scaled = scaler.fit_transform(X_train.fillna(-10000))
 
@@ -461,7 +476,8 @@ def _train_sklearn_online(pipeline, X_train, y_train, X_test, y_test,
         end = min(start + batch_size, len(X_train_scaled))
         X_batch = X_train_scaled[start:end]
         y_batch = y_train.iloc[start:end]
-        model.partial_fit(X_batch, y_batch, classes=classes)
+        sw_batch = sample_weights[start:end] if sample_weights is not None else None
+        model.partial_fit(X_batch, y_batch, classes=classes, sample_weight=sw_batch)
 
     X_test_scaled = scaler.transform(X_test.fillna(-10000))
     y_train_prob = model.predict_proba(X_train_scaled)[:, 1]
@@ -506,12 +522,13 @@ def _train_streaming_online(model_factory, X_train, y_train, X_test, y_test,
 
 
 def train_and_compare_online(df, target_col, id_cols, experiment_name, candidates,
-                             oot_year=None):
+                             oot_year=None, remove_late_rounds=True):
     """Train all online candidate models, log to MLFlow, return comparison."""
     setup_mlflow(experiment_name)
     features = get_feature_columns(df, exclude_cols=id_cols)
     df_train, df_test, df_oot, oot_year = split_data(
         df, target_col, id_cols, oot_year,
+        remove_late_rounds=remove_late_rounds,
     )
 
     df_train = df_train.sort_values("dt_ref")

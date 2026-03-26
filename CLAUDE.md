@@ -40,7 +40,7 @@ python -m ml.departure_model
 streamlit run app/main.py
 
 # MLFlow UI
-mlflow ui --backend-store-uri mlruns/
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 
 # Docker
 docker-compose up

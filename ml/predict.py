@@ -11,14 +11,14 @@ import mlflow
 import pandas as pd
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
-MLFLOW_DIR = os.path.join(BASE_DIR, "mlruns")
+MLFLOW_DB = f"sqlite:///{os.path.join(BASE_DIR, 'mlflow.db')}"
 GOLD_DIR = os.path.join(BASE_DIR, "data", "gold")
 SILVER_DIR = os.path.join(BASE_DIR, "data", "silver")
 BRONZE_PATH = os.path.join(BASE_DIR, "data", "bronze", "results.parquet")
 
 
 def _get_tracking_uri():
-    return f"file://{os.path.abspath(MLFLOW_DIR)}"
+    return MLFLOW_DB
 
 
 def load_best_model(experiment_name):
