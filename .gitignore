@@ -5,6 +5,7 @@ data/silver/
 data/gold/
 !data/champions.csv
 !data/constructors_champions.csv
+*.db
 
 # MLFlow
 mlruns/
@@ -15,6 +16,8 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.venv-timesfm/
+venv-timesfm/
 
 # Environment
 .env
