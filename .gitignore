@@ -1,0 +1,30 @@
+# Data
+data/raw/
+data/bronze/
+data/silver/
+data/gold/
+!data/champions.csv
+!data/constructors_champions.csv
+
+# MLFlow
+mlruns/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# FastF1 cache
+ff1_cache/
+
+# CatBoost
+catboost_info/
