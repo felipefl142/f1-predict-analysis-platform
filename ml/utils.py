@@ -264,14 +264,14 @@ def _suggest_params(trial, model_name, balanced=False):
         return params
     elif model_name == "CatBoost":
         params = {
-            "model__iterations": trial.suggest_int("iterations", 100, 2000, step=100),
-            "model__depth": trial.suggest_int("depth", 3, 8),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+            "model__iterations": trial.suggest_int("iterations", 100, 1000, step=100),
+            "model__depth": trial.suggest_int("depth", 3, 6),
+            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
             "model__l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10.0, log=True),
             "model__bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "model__random_strength": trial.suggest_float("random_strength", 1e-2, 10.0, log=True),
             "model__od_type": "Iter",
-            "model__od_wait": 50,
+            "model__od_wait": 60,
         }
         return params
     return {}
@@ -313,12 +313,16 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
             y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
 
             fit_params = {}
-            if model_name in ("XGBoost", "LightGBM"):
+            if model_name == "XGBoost":
                 # Imputer is first step — transform train/val for eval_set
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
                 fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
                 fit_params["model__verbose"] = False
+            elif model_name == "LightGBM":
+                imputer = cloned.named_steps["imputer"]
+                X_val_imp = imputer.fit_transform(X_fold_val)
+                fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
             elif model_name == "CatBoost":
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
