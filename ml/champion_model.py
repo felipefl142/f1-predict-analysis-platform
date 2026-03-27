@@ -38,6 +38,7 @@ def train_champion_models():
         candidates=batch_candidates,
         balanced=False,
         remove_late_rounds=False,
+        oot_year=2025,
     )
 
     # --- Online models ---
@@ -50,6 +51,7 @@ def train_champion_models():
         experiment_name="f1_champion",
         candidates=online_candidates,
         remove_late_rounds=False,
+        oot_year=2025,
     )
 
     print(f"\nDone. Best batch: {best_batch} | Best online: {best_online}")

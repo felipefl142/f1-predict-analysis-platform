@@ -30,15 +30,31 @@ def setup_mlflow(experiment_name):
     return mlflow.get_experiment_by_name(experiment_name)
 
 
-def get_feature_columns(df, exclude_cols=None):
-    """Return feature column names (everything except metadata and target)."""
+def get_feature_columns(df, exclude_cols=None, drop_redundant=True):
+    """Return feature column names (everything except metadata and target).
+
+    When drop_redundant=True, removes last20/last40 window features and
+    low-importance sprint features to reduce dimensionality.
+    """
     if exclude_cols is None:
         exclude_cols = []
     always_exclude = {"dt_ref", "driverid", "year", "teamid", "team_name",
                       "fl_champion", "fl_constructor_champion", "fl_departed",
                       "prediction_year", "data_as_of"}
     exclude = always_exclude | set(exclude_cols)
-    return [c for c in df.columns if c not in exclude]
+    features = [c for c in df.columns if c not in exclude]
+
+    if drop_redundant:
+        # Drop last20 and last40 windows — keep life and last10 only
+        features = [f for f in features
+                    if not (f.endswith("_last20") or f.endswith("_last40"))]
+        # Keep only high-value sprint features (wins, points, podiums, count)
+        _keep_sprint = ("qtd_sprint_", "qtd_wins_sprint_",
+                        "total_points_sprint_", "qtd_podiums_sprint_")
+        features = [f for f in features
+                    if "sprint" not in f or f.startswith(_keep_sprint)]
+
+    return features
 
 
 def _find_oot_year(df, target_col):
@@ -54,10 +70,12 @@ def _find_oot_year(df, target_col):
     return int(df_temp["year"].max())
 
 
-def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2, remove_late_rounds=True):
-    """Split into train/test/OOT sets with stratification.
+def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
+    """Split into train/test/OOT sets using a temporal strategy.
 
-    Auto-detects OOT year as the most recent year with both classes.
+    OOT = most recent year with both classes.
+    Test = second most recent year with both classes (before OOT).
+    Train = all remaining years before test.
     """
     df = df.copy()
     df["year"] = pd.to_datetime(df["dt_ref"]).dt.year
@@ -67,40 +85,29 @@ def split_data(df, target_col, id_cols, oot_year=None, test_size=0.2, remove_lat
     print(f"  OOT year: {oot_year}")
 
     df_oot = df[df["year"] == oot_year].copy()
-    df_analytics = df[df["year"] < oot_year].copy()
+    df_rest = df[df["year"] < oot_year].copy()
 
-    # Remove last 4 rounds per year to avoid late-season label leakage.
-    # Skipped for in-season models (remove_late_rounds=False) and when there
-    # is only 1 round per year (pre-season snapshot ABTs).
-    df_year_round = df_analytics[["year", "dt_ref"]].drop_duplicates()
-    if remove_late_rounds and df_year_round.groupby("year").size().max() > 5:
-        df_year_round["row_number"] = (
-            df_year_round.sort_values("dt_ref", ascending=False)
-            .groupby("year")
-            .cumcount()
-        )
-        df_year_round = df_year_round[df_year_round["row_number"] > 4]
-        df_year_round = df_year_round.drop("row_number", axis=1)
-        df_analytics = df_analytics.merge(df_year_round, how="inner")
+    # Test = most recent year before OOT with both classes
+    test_year = _find_oot_year(df_rest, target_col)
+    print(f"  Test year: {test_year}")
 
-    entity_target = (
-        df_analytics[id_cols + ["year", target_col]]
-        .drop_duplicates()
-    )
+    df_test = df_rest[df_rest["year"] == test_year].copy()
+    df_train = df_rest[df_rest["year"] < test_year].copy()
 
-    if entity_target[target_col].nunique() < 2:
-        train_entities = entity_target
-        test_entities = entity_target.sample(frac=test_size, random_state=42)
-    else:
-        train_entities, test_entities = model_selection.train_test_split(
-            entity_target,
-            test_size=test_size,
-            random_state=42,
-            stratify=entity_target[target_col],
-        )
-
-    df_train = train_entities.merge(df_analytics, how="inner")
-    df_test = test_entities.merge(df_analytics, how="inner")
+    # Remove last 4 rounds per year from training to avoid late-season
+    # label leakage.  Skipped for in-season models (remove_late_rounds=False)
+    # and when there is only 1 round per year (pre-season snapshot ABTs).
+    if remove_late_rounds:
+        df_year_round = df_train[["year", "dt_ref"]].drop_duplicates()
+        if df_year_round.groupby("year").size().max() > 5:
+            df_year_round["row_number"] = (
+                df_year_round.sort_values("dt_ref", ascending=False)
+                .groupby("year")
+                .cumcount()
+            )
+            df_year_round = df_year_round[df_year_round["row_number"] > 4]
+            df_year_round = df_year_round.drop("row_number", axis=1)
+            df_train = df_train.merge(df_year_round, how="inner")
 
     print(f"  Split: train={len(df_train)}, test={len(df_test)}, oot={len(df_oot)}")
     return df_train, df_test, df_oot, oot_year
@@ -155,19 +162,32 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
 # Cross-validation
 # ---------------------------------------------------------------------------
 
-def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS):
-    """Run stratified K-fold CV and return mean/std AUC scores."""
+def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
+    """Run stratified K-fold CV and return mean/std AUC scores.
+
+    When groups is provided, uses StratifiedGroupKFold so the same entity
+    (e.g. driver) never appears in both train and validation within a fold.
+    """
     # Cap folds so each validation fold has at least one positive example
     n_positives = int(y.sum())
     n_folds = min(n_folds, max(2, n_positives))
-    cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    if groups is not None:
+        # Also cap by number of groups with positive labels
+        pos_groups = groups[y == 1].nunique()
+        n_folds = min(n_folds, max(2, pos_groups))
+        cv = model_selection.StratifiedGroupKFold(n_splits=n_folds)
+    else:
+        cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
     # CatBoost GPU manages its own parallelism; running folds in parallel causes
     # multiple workers to compete for VRAM and OOM-abort. Use n_jobs=1 for GPU models.
     model = pipeline.named_steps.get("model")
     uses_gpu = getattr(model, "task_type", None) == "GPU"
     n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
-        pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs, error_score=0.0,
+        pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs,
+        groups=groups, error_score=0.0,
     )
     # NaN occurs when a validation fold has only one class; treat as random (0.5)
     cv_scores = np.where(np.isnan(cv_scores), 0.5, cv_scores)
@@ -182,15 +202,15 @@ def _suggest_params(trial, model_name, balanced=False):
     """Define Optuna search space per model type. Returns dict of pipeline params."""
     if model_name == "LogisticRegression":
         return {
-            "model__C": trial.suggest_float("C", 1e-4, 100, log=True),
+            "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
             "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
             "model__solver": "saga",
         }
     elif model_name in ("RandomForest", "BalancedRandomForest"):
         return {
             "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 5, 50),
-            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 5, 100),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 12),
+            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 20, 100),
             "model__max_features": trial.suggest_categorical(
                 "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7],
             ),
@@ -198,14 +218,14 @@ def _suggest_params(trial, model_name, balanced=False):
     elif model_name == "XGBoost":
         params = {
             "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 12),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 6),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
             "model__subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 1.0),
-            "model__min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
-            "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-            "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-            "model__gamma": trial.suggest_float("gamma", 1e-8, 5.0, log=True),
+            "model__min_child_weight": trial.suggest_int("min_child_weight", 3, 30),
+            "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
         }
         if balanced:
             params["model__scale_pos_weight"] = trial.suggest_int("scale_pos_weight", 1, 30)
@@ -213,7 +233,7 @@ def _suggest_params(trial, model_name, balanced=False):
     elif model_name == "CatBoost":
         params = {
             "model__iterations": trial.suggest_int("iterations", 100, 1000, step=100),
-            "model__depth": trial.suggest_int("depth", 3, 10),
+            "model__depth": trial.suggest_int("depth", 3, 8),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
             "model__l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10.0, log=True),
             "model__bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
@@ -223,8 +243,12 @@ def _suggest_params(trial, model_name, balanced=False):
     return {}
 
 
-def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=False):
+def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
+                balanced=False, groups=None):
     """Run Optuna Bayesian optimization with TPE sampler and median pruner.
+
+    When groups is provided, uses StratifiedGroupKFold so the same entity
+    never appears in both train and validation within a fold.
 
     Returns:
         (best_pipeline, best_params, best_cv_auc)
@@ -232,7 +256,13 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=F
     # Cap folds so each validation fold has at least one positive example
     n_positives = int(y.sum())
     n_folds = min(N_CV_FOLDS, max(2, n_positives))
-    cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    if groups is not None:
+        pos_groups = groups[y == 1].nunique()
+        n_folds = min(n_folds, max(2, pos_groups))
+        cv = model_selection.StratifiedGroupKFold(n_splits=n_folds)
+    else:
+        cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     def objective(trial):
         params = _suggest_params(trial, model_name, balanced)
@@ -244,7 +274,7 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS, balanced=F
 
         # Use CV with pruning: evaluate fold-by-fold
         scores = []
-        for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y)):
+        for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y, groups)):
             X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
             y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
 
@@ -331,6 +361,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     X_test, y_test = df_test[features], df_test[target_col]
     X_oot, y_oot = df_oot[features], df_oot[target_col]
 
+    # Groups for group-aware CV (prevent same entity in train + validation)
+    groups_train = df_train[id_cols[0]] if id_cols else None
+
     results = []
 
     for name, pipeline in candidates.items():
@@ -348,7 +381,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
                 # --- Step 1: CV with default params ---
                 print(f"    CV ({N_CV_FOLDS}-fold) default params...")
-                cv_mean, cv_std, cv_scores = cross_validate_model(pipeline, X_train, y_train)
+                cv_mean, cv_std, cv_scores = cross_validate_model(
+                    pipeline, X_train, y_train, groups=groups_train,
+                )
                 mlflow.log_metric("cv_auc_mean", cv_mean)
                 mlflow.log_metric("cv_auc_std", cv_std)
                 for i, score in enumerate(cv_scores):
@@ -360,6 +395,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 tuned_pipeline, best_params, tuned_cv_auc = optuna_tune(
                     pipeline, X_train, y_train, name,
                     n_trials=N_OPTUNA_TRIALS, balanced=balanced,
+                    groups=groups_train,
                 )
 
                 if tuned_cv_auc > cv_mean:
@@ -430,10 +466,11 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     print(f"  Retraining {best_model_name} on full dataset with Optuna tuning...")
     best_base_pipeline = candidates[best_model_name]
     all_X, all_y = df[features], df[target_col]
+    all_groups = df[id_cols[0]] if id_cols else None
 
     final_pipeline, _, _ = optuna_tune(
         best_base_pipeline, all_X, all_y, best_model_name,
-        n_trials=N_OPTUNA_TRIALS, balanced=balanced,
+        n_trials=N_OPTUNA_TRIALS, balanced=balanced, groups=all_groups,
     )
 
     with mlflow.start_run(run_name=f"batch_{best_model_name}_final"):
@@ -596,5 +633,39 @@ def train_and_compare_online(df, target_col, id_cols, experiment_name, candidate
     print(f"\n  Online model comparison:")
     print(comparison.to_string(index=False))
     print(f"\n  Best online model: {best_model_name} (by {score_col})")
+
+    # Save best online model for adaptive predict-then-learn at inference time
+    print(f"  Saving best online model ({best_model_name}) for adaptive prediction...")
+    best_config = candidates[best_model_name]
+    train_max_year = int(pd.to_datetime(df_train["dt_ref"]).dt.year.max())
+
+    if best_config["type"] == "sklearn":
+        fresh_pipeline = clone(best_config["model"])
+        _train_sklearn_online(
+            fresh_pipeline, X_train, y_train, X_test, y_test,
+            X_oot, y_oot, features, classes,
+        )
+        save_obj = {"type": "sklearn", "model": fresh_pipeline}
+    else:
+        _, _, _, fresh_model = _train_streaming_online(
+            best_config["model_factory"],
+            X_train, y_train, X_test, y_test,
+            X_oot, y_oot, features,
+        )
+        save_obj = {"type": "streaming", "model": fresh_model}
+
+    import pickle
+    pkl_path = "/tmp/online_model.pkl"
+    with open(pkl_path, "wb") as f:
+        pickle.dump(save_obj, f)
+
+    with mlflow.start_run(run_name=f"online_{best_model_name}_final"):
+        mlflow.log_param("model_type", f"{best_model_name}_final")
+        mlflow.log_param("learning_mode", "online")
+        mlflow.log_param("trained_on", "train_split")
+        mlflow.log_param("train_max_year", train_max_year)
+        mlflow.log_artifact(pkl_path, artifact_path="model")
+        mlflow.set_tag("final_model", "true")
+        mlflow.set_tag("learning_mode", "online")
 
     return comparison, best_model_name

@@ -38,6 +38,7 @@ def train_departure_models():
         candidates=batch_candidates,
         balanced=True,
         remove_late_rounds=False,
+        oot_year=2025,
     )
 
     # --- Online models ---
@@ -50,6 +51,7 @@ def train_departure_models():
         experiment_name="f1_departure",
         candidates=online_candidates,
         remove_late_rounds=False,
+        oot_year=2025,
     )
 
     print(f"\nDone. Best batch: {best_batch} | Best online: {best_online}")

@@ -63,6 +63,24 @@ def _get_model_comparison(experiment_name):
 
 
 @st.cache_data(ttl=3600)
+def _get_champion_predictions_online(year):
+    from ml.predict import predict_champions_online
+    return predict_champions_online(year)
+
+
+@st.cache_data(ttl=3600)
+def _get_team_predictions_online(year):
+    from ml.predict import predict_teams_online
+    return predict_teams_online(year)
+
+
+@st.cache_data(ttl=3600)
+def _get_departure_predictions_online(year):
+    from ml.predict import predict_departures_online
+    return predict_departures_online(year)
+
+
+@st.cache_data(ttl=3600)
 def _get_timesfm_champions(year):
     import os
     from ml.predict import SILVER_DIR, BRONZE_PATH
@@ -194,15 +212,29 @@ def _render_champion_predictions():
     years = _available_years("abt_champions_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    show_tfm = False
-    if TIMESFM_AVAILABLE:
-        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False)
+    col1, col2 = st.columns(2)
+    with col1:
+        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_champ")
+    with col2:
+        show_tfm = False
+        if TIMESFM_AVAILABLE:
+            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False)
 
     try:
-        data = _get_champion_predictions(selected_year)
+        if use_online:
+            data = _get_champion_predictions_online(selected_year)
+        else:
+            data = _get_champion_predictions(selected_year)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        st.info("Run the ETL pipeline and train the models first.")
+        if use_online:
+            st.info("Train online models first: `python -m ml.champion_model`")
+        else:
+            st.info("Run the ETL pipeline and train the models first.")
+        return
+
+    if data.empty:
+        st.warning(f"No data available for {selected_year}.")
         return
 
     drivers = sorted(data["driverid"].unique())
@@ -227,9 +259,10 @@ def _render_champion_predictions():
         for _, row in plot[["driverid", "team_color"]].drop_duplicates().iterrows()
     }
 
+    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_champion", "label", color_map,
-        title=f"{selected_year} Championship Win Probability",
+        title=f"{selected_year} Championship Win Probability ({model_label})",
         y_label="Win Probability",
     )
 
@@ -265,15 +298,29 @@ def _render_team_predictions():
     years = _available_years("abt_teams_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    show_tfm = False
-    if TIMESFM_AVAILABLE:
-        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_teams")
+    col1, col2 = st.columns(2)
+    with col1:
+        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_teams")
+    with col2:
+        show_tfm = False
+        if TIMESFM_AVAILABLE:
+            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_teams")
 
     try:
-        data = _get_team_predictions(selected_year)
+        if use_online:
+            data = _get_team_predictions_online(selected_year)
+        else:
+            data = _get_team_predictions(selected_year)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        st.info("Run the ETL pipeline and train the models first.")
+        if use_online:
+            st.info("Train online models first: `python -m ml.team_model`")
+        else:
+            st.info("Run the ETL pipeline and train the models first.")
+        return
+
+    if data.empty:
+        st.warning(f"No data available for {selected_year}.")
         return
 
     teams = sorted(data["teamid"].unique())
@@ -295,9 +342,10 @@ def _render_team_predictions():
     plot["label"] = plot["teamid"].map(team_names)
     color_map = {name: "#888888" for name in plot["label"].unique()}
 
+    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_constructor_champion", "label", color_map,
-        title=f"{selected_year} Constructor Championship Probability",
+        title=f"{selected_year} Constructor Championship Probability ({model_label})",
         y_label="Win Probability",
     )
 
@@ -341,15 +389,25 @@ def _render_departure_predictions():
     years = _available_years("abt_departures_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    show_tfm = False
-    if TIMESFM_AVAILABLE:
-        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_departures")
+    col1, col2 = st.columns(2)
+    with col1:
+        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_departures")
+    with col2:
+        show_tfm = False
+        if TIMESFM_AVAILABLE:
+            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_departures")
 
     try:
-        data = _get_departure_predictions(selected_year)
+        if use_online:
+            data = _get_departure_predictions_online(selected_year)
+        else:
+            data = _get_departure_predictions(selected_year)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        st.info("Run the ETL pipeline and train the models first.")
+        if use_online:
+            st.info("Train online models first: `python -m ml.departure_model`")
+        else:
+            st.info("Run the ETL pipeline and train the models first.")
         return
 
     if data.empty:
@@ -378,9 +436,10 @@ def _render_departure_predictions():
         for _, row in plot[["driverid", "team_color"]].drop_duplicates().iterrows()
     }
 
+    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_departure", "label", color_map,
-        title=f"{selected_year} Driver Departure Probability",
+        title=f"{selected_year} Driver Departure Probability ({model_label})",
         y_label="Departure Probability",
     )
 
