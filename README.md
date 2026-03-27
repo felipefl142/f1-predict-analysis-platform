@@ -12,10 +12,10 @@ The project follows a **medallion architecture**:
 
 | Layer | Path | Description |
 |-------|------|-------------|
-| **Raw** | `data/raw/` | One Parquet file per FastF1 session (`{year}_{round}_{mode}.parquet`) |
-| **Bronze** | `data/bronze/` | Cleaned and consolidated `results.parquet` |
+| **Raw** | `data/raw/` | One Parquet file per FastF1 session (`{year}_{round}_{mode}.parquet`), includes weather data (2018+) |
+| **Bronze** | `data/bronze/` | Cleaned and consolidated `results.parquet` with weather columns |
 | **Silver** | `data/silver/` | Feature store with temporal windows (`fs_driver_life.parquet`, `fs_driver_last10.parquet`, `fs_driver_last20.parquet`, `fs_driver_last40.parquet`, `fs_driver_all.parquet`) |
-| **Gold** | `data/gold/` | Analytical base tables: `abt_champions.parquet`, `abt_teams.parquet`, `abt_departures.parquet` |
+| **Gold** | `data/gold/` | Analytical base tables: end-of-year (`abt_champions.parquet`, `abt_teams.parquet`, `abt_departures.parquet`) and in-season (`abt_champions_inseason.parquet`, `abt_teams_inseason.parquet`, `abt_departures_inseason.parquet`) |
 
 ## Project Structure
 
@@ -25,30 +25,36 @@ f1-analytics/
 │   ├── main.py             # Entry point with tab layout
 │   ├── tab_predictions.py  # ML predictions tab
 │   ├── tab_eda.py          # Exploratory data analysis tab
-│   ├── tab_duckdb.py       # Interactive DuckDB SQL console
+│   ├── tab_duckdb.py       # Interactive DuckDB SQL console (Ctrl+Enter to run)
 │   └── helpers.py          # Shared UI utilities
 ├── etl/                    # ETL pipeline modules
-│   ├── collect.py          # FastF1 data collection
+│   ├── collect.py          # FastF1 data collection (results + weather)
 │   ├── bronze.py           # Raw to bronze transformation
 │   ├── silver.py           # Bronze to silver (feature store)
 │   ├── gold.py             # Silver to gold (ABTs)
 │   ├── run_pipeline.py     # Full pipeline orchestrator
 │   └── sql/                # DuckDB SQL queries
-│       ├── fs_driver.sql   # Feature store query
-│       ├── fs_all.sql      # All-time features query
-│       ├── abt_champions.sql
-│       ├── abt_teams.sql
-│       └── abt_departures.sql
+│       ├── fs_driver.sql           # Feature store query (point-in-time correct)
+│       ├── fs_all.sql              # Join all temporal windows
+│       ├── abt_champions.sql       # End-of-year champion ABT
+│       ├── abt_teams.sql           # End-of-year constructor ABT
+│       ├── abt_departures.sql      # End-of-year departure ABT
+│       ├── abt_champions_inseason.sql  # In-season champion ABT
+│       ├── abt_teams_inseason.sql      # In-season constructor ABT
+│       └── abt_departures_inseason.sql # In-season departure ABT
 ├── ml/                     # Machine learning models
 │   ├── champion_model.py   # Champion prediction training
 │   ├── team_model.py       # Best team prediction training
 │   ├── departure_model.py  # Driver departure prediction training
-│   ├── model_selection.py  # Candidate model definitions
+│   ├── model_selection.py  # Candidate model definitions (batch + online)
 │   ├── predict.py          # Inference utilities
-│   └── utils.py            # Training, splits, metrics, MLFlow setup
+│   ├── utils.py            # Training, splits, metrics, MLFlow setup
+│   ├── evaluate_timesfm.py # TimesFM zero-shot forecast evaluation
+│   └── timefm_predictor.py # TimesFM predictor wrapper
 ├── notebooks/              # Jupyter notebooks for exploration
 ├── data/                   # Parquet data files (raw/bronze/silver/gold)
-├── mlruns/                 # MLFlow experiment tracking
+├── mlruns/                 # MLFlow artifact storage
+├── mlflow.db               # MLFlow metadata (SQLite backend)
 ├── Dockerfile
 ├── docker-compose.yaml
 └── requirements.txt
@@ -58,13 +64,14 @@ f1-analytics/
 
 All tools are free and open source:
 
-- **Data collection**: [FastF1](https://github.com/theOehrly/Fast-F1)
+- **Data collection**: [FastF1](https://github.com/theOehrly/Fast-F1) (results + weather data)
 - **SQL engine**: [DuckDB](https://duckdb.org/)
 - **Data processing**: pandas
-- **ML models**: scikit-learn, XGBoost, CatBoost
+- **ML models**: scikit-learn, XGBoost, CatBoost, river (online learning)
 - **Class balancing**: imbalanced-learn
-- **Hyperparameter tuning**: Optuna
-- **Experiment tracking**: MLFlow
+- **Hyperparameter tuning**: Optuna (TPE sampler, median pruner)
+- **Zero-shot forecasting**: TimesFM (separate venv)
+- **Experiment tracking**: MLFlow (SQLite backend)
 - **Web app**: Streamlit
 - **Visualizations**: Plotly, Matplotlib
 - **Containerization**: Docker
@@ -86,23 +93,32 @@ pip install -r requirements.txt
 
 ### Running the Full ETL Pipeline
 
-Collects data from FastF1 and builds all medallion layers (raw -> bronze -> silver -> gold):
+Collects data from FastF1 (including weather) and builds all medallion layers (raw -> bronze -> silver -> gold):
 
 ```bash
 python -m etl.run_pipeline --years 2020 2021 2022 2023 2024 2025
 ```
 
+To re-collect with weather data for years that were previously collected without it (FastF1 weather is available from 2018+):
+
+```bash
+python -m etl.run_pipeline --years 2018 2019 2020 2021 2022 2023 2024 2025 --force
+```
+
 This runs all four steps sequentially:
-1. **Collect** — Downloads session results from FastF1 API
-2. **Bronze** — Cleans and consolidates raw data
-3. **Silver** — Builds the feature store with multiple temporal windows
-4. **Gold** — Constructs analytical base tables for ML
+1. **Collect** — Downloads session results and weather data from FastF1 API
+2. **Bronze** — Cleans and consolidates raw data (handles mixed schemas via `union_by_name`)
+3. **Silver** — Builds the feature store with multiple temporal windows (includes weather features)
+4. **Gold** — Constructs analytical base tables for ML (end-of-year and in-season variants)
 
 ### Running Individual ETL Steps
 
 ```bash
 # Collect raw data (R = Race, S = Sprint)
 python -m etl.collect --years 2024 2025 --modes R S
+
+# Re-collect existing files (e.g., to add weather data)
+python -m etl.collect --years 2018 2019 2020 --force
 
 # Build bronze layer
 python -m etl.bronze
@@ -116,7 +132,7 @@ python -m etl.gold
 
 ### Training ML Models
 
-Each prediction task trains and compares multiple model types (Random Forest, XGBoost, CatBoost, Logistic Regression, etc.), logging all runs to MLFlow:
+Each prediction task trains and compares multiple batch models (Logistic Regression, Random Forest, XGBoost, CatBoost) and online models (SGDClassifier, streaming via river), with Optuna hyperparameter tuning. All runs are logged to MLFlow:
 
 ```bash
 # Champion prediction
@@ -129,6 +145,20 @@ python -m ml.team_model
 python -m ml.departure_model
 ```
 
+### TimesFM Zero-Shot Forecasts
+
+Evaluate Google's TimesFM foundation model as a zero-shot forecaster on the same prediction targets. Uses a separate virtual environment and logs results to the same MLFlow experiments for direct comparison:
+
+```bash
+# Evaluate all 3 targets
+.venv-timesfm/bin/python -m ml.evaluate_timesfm
+
+# Evaluate a single target
+.venv-timesfm/bin/python -m ml.evaluate_timesfm champion
+.venv-timesfm/bin/python -m ml.evaluate_timesfm constructor
+.venv-timesfm/bin/python -m ml.evaluate_timesfm departure
+```
+
 ### Running the Web App
 
 ```bash
@@ -139,14 +169,14 @@ The app runs at `http://localhost:8501` and has three tabs:
 
 - **Predictions** — ML model predictions with model comparison
 - **EDA** — Interactive exploratory data analysis with Plotly charts
-- **DuckDB Console** — Run SQL queries directly against the Parquet data
+- **DuckDB Console** — Run SQL queries directly against the Parquet data (Ctrl+Enter to execute, 13 example queries including weather analysis)
 
 ### MLFlow UI
 
 View experiment runs, compare metrics, and inspect model artifacts:
 
 ```bash
-mlflow ui --backend-store-uri mlruns/
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
 Open `http://localhost:5000` in your browser.
