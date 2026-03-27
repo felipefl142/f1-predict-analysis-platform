@@ -231,15 +231,16 @@ def _suggest_params(trial, model_name, balanced=False):
         }
     elif model_name == "XGBoost":
         params = {
-            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
+            "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
             "model__max_depth": trial.suggest_int("max_depth", 3, 6),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
-            "model__subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 1.0),
+            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
+            "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
             "model__min_child_weight": trial.suggest_int("min_child_weight", 3, 30),
             "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
+            "model__early_stopping_rounds": 50,
         }
         if balanced:
             params["model__scale_pos_weight"] = trial.suggest_int("scale_pos_weight", 1, 30)
@@ -292,7 +293,14 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
             X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
             y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
 
-            cloned.fit(X_fold_train, y_fold_train)
+            fit_params = {}
+            if model_name == "XGBoost":
+                # Imputer is first step — transform train/val for eval_set
+                imputer = cloned.named_steps["imputer"]
+                X_val_imp = imputer.fit_transform(X_fold_val)
+                fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
+                fit_params["model__verbose"] = False
+            cloned.fit(X_fold_train, y_fold_train, **fit_params)
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
             if y_fold_val.nunique() < 2:
                 # Validation fold has only one class; treat as random performance
@@ -329,6 +337,9 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
     best_params = _suggest_params_from_dict(best_raw_params, model_name, balanced)
     best_pipeline = clone(pipeline)
     best_pipeline.set_params(**best_params)
+    # Disable early stopping for final refit on full data (no eval_set)
+    if model_name == "XGBoost":
+        best_pipeline.set_params(model__early_stopping_rounds=None)
     best_pipeline.fit(X, y)
 
     return best_pipeline, best_raw_params, best_cv_auc
@@ -417,6 +428,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
                 else:
                     tuned_cv_auc = cv_mean
+                    # Disable early stopping for full fit (no eval_set)
+                    if name == "XGBoost":
+                        pipeline.set_params(model__early_stopping_rounds=None)
                     pipeline.fit(X_train, y_train)
                     best_params = {}
                     print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")

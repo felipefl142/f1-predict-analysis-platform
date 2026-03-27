@@ -67,6 +67,7 @@ def get_batch_models(balanced=False):
                 n_jobs=-1,
                 scale_pos_weight=10 if balanced else 1,
                 eval_metric="logloss",
+                early_stopping_rounds=50,
                 verbosity=0,
                 device="cuda",
                 tree_method="hist",
