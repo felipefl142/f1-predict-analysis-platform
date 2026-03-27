@@ -131,13 +131,18 @@ def _available_years(abt_filename: str) -> list[int]:
 
 def _line_chart(plot_df, x_col, y_col, color_col, color_map,
                 title, y_label, x_label="Race date"):
-    """Build a Plotly line+marker chart."""
+    """Build a Plotly line+marker chart with discrete race dates on x-axis."""
     fig = go.Figure()
+    # Get all unique event dates sorted for discrete x-axis
+    all_dates = sorted(plot_df[x_col].unique())
+    date_labels = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in all_dates]
+
     for entity in plot_df[color_col].unique():
         sub = plot_df[plot_df[color_col] == entity].sort_values(x_col)
         color = color_map.get(entity, "#888888")
+        x_labels = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in sub[x_col]]
         fig.add_trace(go.Scatter(
-            x=sub[x_col], y=sub[y_col],
+            x=x_labels, y=sub[y_col],
             mode="lines+markers",
             name=entity,
             line=dict(color=color, width=2),
@@ -150,6 +155,11 @@ def _line_chart(plot_df, x_col, y_col, color_col, color_map,
         yaxis_tickformat=".0%",
         hovermode="x unified",
         legend_title=color_col,
+        xaxis=dict(
+            type="category",
+            categoryorder="array",
+            categoryarray=date_labels,
+        ),
     )
     return fig
 
@@ -340,7 +350,7 @@ def _render_team_predictions():
 
     plot = data[data["teamid"].isin(selected)].copy()
     plot["label"] = plot["teamid"].map(team_names)
-    color_map = {name: "#888888" for name in plot["label"].unique()}
+    color_map = {name: get_team_color(name) for name in plot["label"].unique()}
 
     model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(

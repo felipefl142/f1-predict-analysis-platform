@@ -158,6 +158,20 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
     return auc_train, auc_test, auc_oot
 
 
+def _log_feature_importance_chart(fi_series, model_name):
+    """Log a horizontal bar chart of feature importances to MLflow."""
+    fig, ax = plt.subplots(figsize=(8, max(4, len(fi_series) * 0.3)), dpi=100)
+    fi_series = fi_series.sort_values(ascending=True)
+    ax.barh(fi_series.index, fi_series.values)
+    ax.set_xlabel("Importance")
+    ax.set_title(f"Feature Importances — {model_name}")
+    ax.grid(True, axis="x", alpha=0.3)
+    fi_chart_path = "/tmp/feature_importances.png"
+    fig.savefig(fi_chart_path, bbox_inches="tight")
+    plt.close(fig)
+    mlflow.log_artifact(fi_chart_path)
+
+
 # ---------------------------------------------------------------------------
 # Cross-validation
 # ---------------------------------------------------------------------------
@@ -431,6 +445,11 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     fi_path = "/tmp/feature_importances.md"
                     fi.head(30).to_markdown(fi_path)
                     mlflow.log_artifact(fi_path)
+                    # Log top features as metrics for easy comparison in MLflow UI
+                    for feat_name, importance in fi.head(30).items():
+                        mlflow.log_metric(f"fi_{feat_name}", round(importance, 6))
+                    # Log bar chart
+                    _log_feature_importance_chart(fi.head(20), name)
 
                 mlflow.sklearn.log_model(pipeline, artifact_path="model")
 

@@ -37,7 +37,7 @@ def load_best_model(experiment_name):
 
     runs = client.search_runs(
         experiment_ids=[experiment.experiment_id],
-        filter_string="tags.final_model = 'true'",
+        filter_string="tags.final_model = 'true' AND tags.learning_mode != 'online'",
         order_by=["start_time DESC"],
         max_results=1,
     )
@@ -94,16 +94,12 @@ def _driver_meta():
     return df
 
 
-_ALWAYS_EXCLUDE = {
-    "dt_ref", "driverid", "teamid", "team_name", "year",
-    "fl_champion", "fl_constructor_champion", "fl_departed",
-    "prediction_year", "data_as_of", "season_race_number",
-    "season_total_races", "season_fraction",
-}
-
-
-def _feature_cols(df, *extra_exclude):
-    return [c for c in df.columns if c not in _ALWAYS_EXCLUDE | set(extra_exclude)]
+def _model_feature_cols(model):
+    """Extract feature column names from a trained sklearn pipeline."""
+    first_step = model[0] if hasattr(model, '__getitem__') else None
+    if first_step is not None and hasattr(first_step, 'feature_names_in_'):
+        return list(first_step.feature_names_in_)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +156,7 @@ def predict_champions(year: int, model=None) -> pd.DataFrame:
         features_df["season_race_number"] / features_df["season_total_races"]
     ).round(3)
 
-    feat_cols = _feature_cols(features_df)
+    feat_cols = _model_feature_cols(model)
     features_df["prob_champion"] = model.predict_proba(features_df[feat_cols])[:, 1]
 
     result = features_df[["dt_ref", "driverid", "prob_champion",
@@ -206,7 +202,7 @@ def predict_teams(year: int, model=None) -> pd.DataFrame:
 
     con.close()
 
-    feat_cols = _feature_cols(abt, "num_drivers")
+    feat_cols = _model_feature_cols(model)
     abt["prob_constructor_champion"] = model.predict_proba(abt[feat_cols])[:, 1]
     abt["year"] = year
 
@@ -247,7 +243,7 @@ def predict_departures(year: int | None = None, model=None) -> pd.DataFrame:
     if abt.empty:
         return pd.DataFrame()
 
-    feat_cols = _feature_cols(abt)
+    feat_cols = _model_feature_cols(model)
     abt["prob_departure"] = model.predict_proba(abt[feat_cols])[:, 1]
 
     result = abt[["dt_ref", "driverid", "prob_departure",
@@ -313,6 +309,16 @@ def _online_predict(model_info, X):
         scaler = pipeline.named_steps["scaler"]
         model = pipeline.named_steps["model"]
         X_scaled = scaler.transform(X.fillna(-10000))
+        # SGDClassifier decision margins can be extreme (±600+), making
+        # predict_proba/sigmoid saturate to 0/1.  Normalize margins to
+        # zero-mean unit-variance before applying sigmoid so the output
+        # spans a useful probability range.
+        if hasattr(model, "decision_function"):
+            raw = model.decision_function(X_scaled)
+            std = raw.std()
+            if std > 0:
+                raw = (raw - raw.mean()) / std
+            return 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
         return model.predict_proba(X_scaled)[:, 1]
     else:
         model = model_info["model"]
