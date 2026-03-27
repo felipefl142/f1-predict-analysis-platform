@@ -176,7 +176,7 @@ The app runs at `http://localhost:8501` and has three tabs:
 View experiment runs, compare metrics, and inspect model artifacts:
 
 ```bash
-mlflow ui --backend-store-uri sqlite:///mlflow.db
+
 ```
 
 Open `http://localhost:5000` in your browser.

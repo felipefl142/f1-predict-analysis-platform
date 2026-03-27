@@ -104,7 +104,7 @@ def predict_timeseries(
         dates = entity_df[date_col].tolist()
 
         for i, dt in enumerate(dates):
-            context = values[max(0, i - _CONTEXT_LEN): i + 1]
+            context = values[max(0, i + 1 - _CONTEXT_LEN): i + 1]
             # Pad short contexts with the first value
             if len(context) < _CONTEXT_LEN:
                 context = [context[0]] * (_CONTEXT_LEN - len(context)) + context
