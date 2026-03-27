@@ -47,8 +47,15 @@ def build_bronze():
                          AND TRY_CAST("Position" AS INTEGER) IS NOT NULL
                     THEN TRY_CAST("GridPosition" AS INTEGER) - TRY_CAST("Position" AS INTEGER)
                     ELSE 0
-                END AS overtakes
-            FROM read_parquet('{raw_pattern}')
+                END AS overtakes,
+                TRY_CAST("AirTemp" AS DOUBLE) AS air_temp,
+                TRY_CAST("TrackTemp" AS DOUBLE) AS track_temp,
+                TRY_CAST("Humidity" AS DOUBLE) AS humidity,
+                TRY_CAST("Pressure" AS DOUBLE) AS pressure,
+                TRY_CAST("WindSpeed" AS DOUBLE) AS wind_speed,
+                TRY_CAST("WindDirection" AS DOUBLE) AS wind_direction,
+                COALESCE(TRY_CAST("Rainfall" AS INTEGER), 0) AS rainfall
+            FROM read_parquet('{raw_pattern}', union_by_name=true)
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY "DriverId", "Year", "RoundNumber", "Mode"
                 ORDER BY "Date" DESC

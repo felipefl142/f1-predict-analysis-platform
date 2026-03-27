@@ -15,7 +15,7 @@ past_sessions AS (
         r.*
     FROM dim_dates d
     INNER JOIN read_parquet('{bronze_path}') r
-        ON r.event_date <= d.dt_ref
+        ON r.event_date < d.dt_ref
 ),
 
 eligible_drivers AS (
@@ -121,7 +121,16 @@ tb_stats AS (
         SUM(CASE WHEN mode IN ('Sprint Race', 'Sprint') AND position < grid_position THEN 1 ELSE 0 END) AS qtd_sessions_with_overtake_sprint_{suffix},
         AVG(grid_position - position) AS avg_overtakes_{suffix},
         AVG(CASE WHEN mode IN ('Race') THEN grid_position - position END) AS avg_overtakes_race_{suffix},
-        AVG(CASE WHEN mode IN ('Sprint Race', 'Sprint') THEN grid_position - position END) AS avg_overtakes_sprint_{suffix}
+        AVG(CASE WHEN mode IN ('Sprint Race', 'Sprint') THEN grid_position - position END) AS avg_overtakes_sprint_{suffix},
+
+        -- Weather
+        AVG(air_temp) AS avg_air_temp_{suffix},
+        AVG(track_temp) AS avg_track_temp_{suffix},
+        AVG(humidity) AS avg_humidity_{suffix},
+        AVG(pressure) AS avg_pressure_{suffix},
+        AVG(wind_speed) AS avg_wind_speed_{suffix},
+        SUM(rainfall) AS qtd_sessions_rain_{suffix},
+        AVG(rainfall * 1.0) AS pct_sessions_rain_{suffix}
 
     FROM tb_results
     GROUP BY dt_ref, driverid

@@ -22,12 +22,15 @@ MAX_RETRIES = 5
 
 
 class CollectResults:
-    def __init__(self, years=None, modes=None):
+    def __init__(self, years=None, modes=None, force=False):
         self.years = years or [2024, 2025]
         self.modes = modes or ["R", "S"]
+        self.force = force
         os.makedirs(RAW_DIR, exist_ok=True)
 
     def _already_collected(self, year, gp, mode):
+        if self.force:
+            return False
         filename = os.path.join(RAW_DIR, f"{year}_{gp:02d}_{mode}.parquet")
         return os.path.exists(filename)
 
@@ -48,7 +51,7 @@ class CollectResults:
 
         for attempt in range(MAX_RETRIES):
             try:
-                session.load(telemetry=False, weather=False, messages=False)
+                session.load(telemetry=False, weather=True, messages=False)
                 break
             except RateLimitExceededError:
                 wait = RATE_LIMIT_WAIT * (attempt + 1)
@@ -72,6 +75,21 @@ class CollectResults:
         df["EventName"] = session.event["EventName"]
         df["Country"] = session.event["Country"]
         df["Location"] = session.event["Location"]
+
+        # Aggregate weather data to session-level summary
+        weather = getattr(session, "weather_data", None)
+        if weather is not None and not weather.empty:
+            df["AirTemp"] = weather["AirTemp"].mean()
+            df["TrackTemp"] = weather["TrackTemp"].mean()
+            df["Humidity"] = weather["Humidity"].mean()
+            df["Pressure"] = weather["Pressure"].mean()
+            df["WindSpeed"] = weather["WindSpeed"].mean()
+            df["WindDirection"] = weather["WindDirection"].mean()
+            df["Rainfall"] = int(weather["Rainfall"].any())
+        else:
+            for col in ("AirTemp", "TrackTemp", "Humidity", "Pressure",
+                        "WindSpeed", "WindDirection", "Rainfall"):
+                df[col] = None
 
         return df
 
@@ -106,8 +124,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Collect F1 session results")
     parser.add_argument("--years", "-y", nargs="+", type=int, default=[2024, 2025])
     parser.add_argument("--modes", "-m", nargs="+", default=["R", "S"])
+    parser.add_argument("--force", "-f", action="store_true", help="Re-collect even if files exist")
     args = parser.parse_args()
 
-    collector = CollectResults(years=args.years, modes=args.modes)
+    collector = CollectResults(years=args.years, modes=args.modes, force=args.force)
     collector.process_years()
     print("Collection complete.")

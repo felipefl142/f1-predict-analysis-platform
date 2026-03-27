@@ -8,7 +8,7 @@ from etl.silver import build_silver
 from etl.gold import build_gold
 
 
-def run_pipeline(years=None, modes=None):
+def run_pipeline(years=None, modes=None, force=False):
     if years is None:
         years = list(range(2020, 2026))
     if modes is None:
@@ -19,7 +19,7 @@ def run_pipeline(years=None, modes=None):
     print("=" * 60)
 
     print("\nStep 1/4: Collecting data from FastF1...")
-    collector = CollectResults(years=years, modes=modes)
+    collector = CollectResults(years=years, modes=modes, force=force)
     collector.process_years()
 
     print("\nStep 2/4: Building bronze layer...")
@@ -42,6 +42,7 @@ if __name__ == "__main__":
         "--years", "-y", nargs="+", type=int, default=list(range(2020, 2026))
     )
     parser.add_argument("--modes", "-m", nargs="+", default=["R", "S"])
+    parser.add_argument("--force", "-f", action="store_true", help="Re-collect even if files exist")
     args = parser.parse_args()
 
-    run_pipeline(years=args.years, modes=args.modes)
+    run_pipeline(years=args.years, modes=args.modes, force=args.force)
