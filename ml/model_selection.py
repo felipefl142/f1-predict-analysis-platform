@@ -3,12 +3,12 @@
 import math
 
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from feature_engine.imputation import ArbitraryNumberImputer
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 from imblearn.ensemble import BalancedRandomForestClassifier
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -38,14 +38,17 @@ def get_batch_models(balanced=False):
                 class_weight=class_weight,
             )),
         ]),
-        "RandomForest": Pipeline([
+        "LightGBM": Pipeline([
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
-            ("model", RandomForestClassifier(
+            ("model", LGBMClassifier(
                 n_estimators=500,
-                min_samples_leaf=50,
+                max_depth=6,
+                learning_rate=0.1,
                 random_state=42,
                 n_jobs=-1,
-                class_weight=class_weight,
+                is_unbalance=balanced,
+                device="gpu",
+                verbosity=-1,
             )),
         ]),
         "BalancedRandomForest": ImbPipeline([
@@ -67,7 +70,6 @@ def get_batch_models(balanced=False):
                 n_jobs=-1,
                 scale_pos_weight=10 if balanced else 1,
                 eval_metric="logloss",
-                early_stopping_rounds=50,
                 verbosity=0,
                 device="cuda",
                 tree_method="hist",

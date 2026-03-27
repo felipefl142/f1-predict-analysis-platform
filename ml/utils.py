@@ -194,10 +194,12 @@ def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
     else:
         cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
-    # CatBoost GPU manages its own parallelism; running folds in parallel causes
+    # GPU models manage their own parallelism; running folds in parallel causes
     # multiple workers to compete for VRAM and OOM-abort. Use n_jobs=1 for GPU models.
     model = pipeline.named_steps.get("model")
-    uses_gpu = getattr(model, "task_type", None) == "GPU"
+    model_params = model.get_params() if hasattr(model, "get_params") else {}
+    uses_gpu = (model_params.get("task_type") == "GPU"
+                or model_params.get("device") in ("cuda", "gpu"))
     n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
         pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs,
@@ -220,7 +222,7 @@ def _suggest_params(trial, model_name, balanced=False):
             "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
             "model__solver": "saga",
         }
-    elif model_name in ("RandomForest", "BalancedRandomForest"):
+    elif model_name == "BalancedRandomForest":
         return {
             "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
             "model__max_depth": trial.suggest_int("max_depth", 3, 12),
@@ -229,6 +231,21 @@ def _suggest_params(trial, model_name, balanced=False):
                 "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7],
             ),
         }
+    elif model_name == "LightGBM":
+        params = {
+            "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 8),
+            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
+            "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
+            "model__min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
+            "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "model__early_stopping_rounds": 50,
+        }
+        if balanced:
+            params["model__is_unbalance"] = True
+        return params
     elif model_name == "XGBoost":
         params = {
             "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
@@ -247,12 +264,14 @@ def _suggest_params(trial, model_name, balanced=False):
         return params
     elif model_name == "CatBoost":
         params = {
-            "model__iterations": trial.suggest_int("iterations", 100, 1000, step=100),
+            "model__iterations": trial.suggest_int("iterations", 100, 2000, step=100),
             "model__depth": trial.suggest_int("depth", 3, 8),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
             "model__l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10.0, log=True),
             "model__bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "model__random_strength": trial.suggest_float("random_strength", 1e-2, 10.0, log=True),
+            "model__od_type": "Iter",
+            "model__od_wait": 50,
         }
         return params
     return {}
@@ -294,11 +313,16 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
             y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
 
             fit_params = {}
-            if model_name == "XGBoost":
+            if model_name in ("XGBoost", "LightGBM"):
                 # Imputer is first step — transform train/val for eval_set
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
                 fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
+                fit_params["model__verbose"] = False
+            elif model_name == "CatBoost":
+                imputer = cloned.named_steps["imputer"]
+                X_val_imp = imputer.fit_transform(X_fold_val)
+                fit_params["model__eval_set"] = (X_val_imp, y_fold_val)
                 fit_params["model__verbose"] = False
             cloned.fit(X_fold_train, y_fold_train, **fit_params)
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
@@ -338,8 +362,10 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
     best_pipeline = clone(pipeline)
     best_pipeline.set_params(**best_params)
     # Disable early stopping for final refit on full data (no eval_set)
-    if model_name == "XGBoost":
+    if model_name in ("XGBoost", "LightGBM"):
         best_pipeline.set_params(model__early_stopping_rounds=None)
+    elif model_name == "CatBoost":
+        best_pipeline.set_params(model__od_type=None, model__od_wait=None)
     best_pipeline.fit(X, y)
 
     return best_pipeline, best_raw_params, best_cv_auc
@@ -429,8 +455,10 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 else:
                     tuned_cv_auc = cv_mean
                     # Disable early stopping for full fit (no eval_set)
-                    if name == "XGBoost":
+                    if name in ("XGBoost", "LightGBM"):
                         pipeline.set_params(model__early_stopping_rounds=None)
+                    elif name == "CatBoost":
+                        pipeline.set_params(model__od_type=None, model__od_wait=None)
                     pipeline.fit(X_train, y_train)
                     best_params = {}
                     print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")
