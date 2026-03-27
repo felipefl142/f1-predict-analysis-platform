@@ -2,6 +2,7 @@
 
 import copy
 import os
+import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -423,6 +424,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     for name, pipeline in candidates.items():
         print(f"\n  [BATCH] Training {name}...")
+        t_start = time.time()
         try:
             with mlflow.start_run(run_name=f"batch_{name}"):
                 mlflow.log_param("model_type", name)
@@ -498,6 +500,10 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     _log_feature_importance_chart(fi.head(20), name)
 
                 mlflow.sklearn.log_model(pipeline, artifact_path="model")
+
+                elapsed = time.time() - t_start
+                mlflow.log_metric("training_time_s", round(elapsed, 1))
+                print(f"    Training time: {elapsed:.1f}s")
 
                 results.append({
                     "model": name,
