@@ -114,11 +114,24 @@ def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
     return df_train, df_test, df_oot, oot_year
 
 
+def _log_classification_metrics(y_true, y_prob, suffix):
+    """Log PR-AUC, F1, log loss, and Brier score for a single split."""
+    if len(np.unique(y_true)) < 2:
+        return
+    y_pred = (y_prob >= 0.5).astype(int)
+    mlflow.log_metric(f"pr_auc_{suffix}", metrics.average_precision_score(y_true, y_prob))
+    mlflow.log_metric(f"f1_{suffix}", metrics.f1_score(y_true, y_pred))
+    mlflow.log_metric(f"log_loss_{suffix}", metrics.log_loss(y_true, y_prob))
+    mlflow.log_metric(f"brier_{suffix}", metrics.brier_score_loss(y_true, y_prob))
+
+
 def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
                    y_oot=None, y_oot_prob=None):
-    """Plot ROC curves and log to MLFlow."""
+    """Plot ROC + Precision-Recall curves and log metrics to MLFlow."""
     if len(np.unique(y_train)) < 2:
         return None, None, None
+
+    # --- ROC metrics ---
     auc_train = metrics.roc_auc_score(y_train, y_train_prob)
     roc_train = metrics.roc_curve(y_train, y_train_prob)
     mlflow.log_metric("auc_train", auc_train)
@@ -130,31 +143,65 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
         roc_test = metrics.roc_curve(y_test, y_test_prob)
         mlflow.log_metric("auc_test", auc_test)
 
-    plt.figure(dpi=100)
-    plt.plot(roc_train[0], roc_train[1])
-    legend = [f"Train: {auc_train:.4f}"]
-    if roc_test is not None:
-        plt.plot(roc_test[0], roc_test[1])
-        legend.append(f"Test: {auc_test:.4f}")
-
     auc_oot = None
+    roc_oot = None
     if y_oot is not None and y_oot_prob is not None and len(np.unique(y_oot)) > 1:
         auc_oot = metrics.roc_auc_score(y_oot, y_oot_prob)
         roc_oot = metrics.roc_curve(y_oot, y_oot_prob)
         mlflow.log_metric("auc_oot", auc_oot)
-        plt.plot(roc_oot[0], roc_oot[1])
-        legend.append(f"OOT: {auc_oot:.4f}")
 
-    plt.legend(legend)
-    plt.grid(True)
-    plt.title("ROC Curve")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
+    # --- PR curves ---
+    pr_train = metrics.precision_recall_curve(y_train, y_train_prob)
+    ap_train = metrics.average_precision_score(y_train, y_train_prob)
 
-    roc_path = "/tmp/roc_curve.png"
-    plt.savefig(roc_path, bbox_inches="tight")
-    plt.close()
-    mlflow.log_artifact(roc_path)
+    pr_test, ap_test = None, None
+    if roc_test is not None:
+        pr_test = metrics.precision_recall_curve(y_test, y_test_prob)
+        ap_test = metrics.average_precision_score(y_test, y_test_prob)
+
+    pr_oot, ap_oot = None, None
+    if roc_oot is not None:
+        pr_oot = metrics.precision_recall_curve(y_oot, y_oot_prob)
+        ap_oot = metrics.average_precision_score(y_oot, y_oot_prob)
+
+    # --- Extra metrics (PR-AUC, F1, log loss, Brier) ---
+    _log_classification_metrics(y_train, y_train_prob, "train")
+    _log_classification_metrics(y_test, y_test_prob, "test")
+    if y_oot is not None and y_oot_prob is not None:
+        _log_classification_metrics(y_oot, y_oot_prob, "oot")
+
+    # --- Plot ROC + PR side by side ---
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 5), dpi=100)
+
+    # ROC subplot
+    ax_roc.plot(roc_train[0], roc_train[1], label=f"Train: {auc_train:.4f}")
+    if roc_test is not None:
+        ax_roc.plot(roc_test[0], roc_test[1], label=f"Test: {auc_test:.4f}")
+    if roc_oot is not None:
+        ax_roc.plot(roc_oot[0], roc_oot[1], label=f"OOT: {auc_oot:.4f}")
+    ax_roc.plot([0, 1], [0, 1], "k--", alpha=0.3)
+    ax_roc.set_xlabel("False Positive Rate")
+    ax_roc.set_ylabel("True Positive Rate")
+    ax_roc.set_title("ROC Curve")
+    ax_roc.legend()
+    ax_roc.grid(True)
+
+    # PR subplot
+    ax_pr.plot(pr_train[1], pr_train[0], label=f"Train AP: {ap_train:.4f}")
+    if pr_test is not None:
+        ax_pr.plot(pr_test[1], pr_test[0], label=f"Test AP: {ap_test:.4f}")
+    if pr_oot is not None:
+        ax_pr.plot(pr_oot[1], pr_oot[0], label=f"OOT AP: {ap_oot:.4f}")
+    ax_pr.set_xlabel("Recall")
+    ax_pr.set_ylabel("Precision")
+    ax_pr.set_title("Precision-Recall Curve")
+    ax_pr.legend()
+    ax_pr.grid(True)
+
+    curves_path = "/tmp/roc_pr_curves.png"
+    fig.savefig(curves_path, bbox_inches="tight")
+    plt.close(fig)
+    mlflow.log_artifact(curves_path)
 
     return auc_train, auc_test, auc_oot
 
@@ -215,7 +262,7 @@ def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
 # Optuna hyperparameter tuning
 # ---------------------------------------------------------------------------
 
-def _suggest_params(trial, model_name, balanced=False):
+def _suggest_params(trial, model_name):
     """Define Optuna search space per model type. Returns dict of pipeline params."""
     if model_name == "LogisticRegression":
         return {
@@ -233,7 +280,7 @@ def _suggest_params(trial, model_name, balanced=False):
             ),
         }
     elif model_name == "LightGBM":
-        params = {
+        return {
             "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
             "model__max_depth": trial.suggest_int("max_depth", 3, 8),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
@@ -244,11 +291,8 @@ def _suggest_params(trial, model_name, balanced=False):
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__early_stopping_rounds": 50,
         }
-        if balanced:
-            params["model__is_unbalance"] = True
-        return params
     elif model_name == "XGBoost":
-        params = {
+        return {
             "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
             "model__max_depth": trial.suggest_int("max_depth", 3, 6),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
@@ -260,26 +304,11 @@ def _suggest_params(trial, model_name, balanced=False):
             "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
             "model__early_stopping_rounds": 50,
         }
-        if balanced:
-            params["model__scale_pos_weight"] = trial.suggest_int("scale_pos_weight", 1, 30)
-        return params
-    elif model_name == "CatBoost":
-        params = {
-            "model__iterations": trial.suggest_int("iterations", 100, 1000, step=100),
-            "model__depth": trial.suggest_int("depth", 3, 6),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "model__l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10.0, log=True),
-            "model__bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
-            "model__random_strength": trial.suggest_float("random_strength", 1e-2, 10.0, log=True),
-            "model__od_type": "Iter",
-            "model__od_wait": 60,
-        }
-        return params
     return {}
 
 
 def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
-                balanced=False, groups=None):
+                groups=None):
     """Run Optuna Bayesian optimization with TPE sampler and median pruner.
 
     When groups is provided, uses StratifiedGroupKFold so the same entity
@@ -300,7 +329,7 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
         cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     def objective(trial):
-        params = _suggest_params(trial, model_name, balanced)
+        params = _suggest_params(trial, model_name)
         if not params:
             return 0.0
 
@@ -324,11 +353,6 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
                 fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
-            elif model_name == "CatBoost":
-                imputer = cloned.named_steps["imputer"]
-                X_val_imp = imputer.fit_transform(X_fold_val)
-                fit_params["model__eval_set"] = (X_val_imp, y_fold_val)
-                fit_params["model__verbose"] = False
             cloned.fit(X_fold_train, y_fold_train, **fit_params)
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
             if y_fold_val.nunique() < 2:
@@ -363,20 +387,18 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
         return pipeline, {}, 0.0
 
     # Build best pipeline
-    best_params = _suggest_params_from_dict(best_raw_params, model_name, balanced)
+    best_params = _suggest_params_from_dict(best_raw_params, model_name)
     best_pipeline = clone(pipeline)
     best_pipeline.set_params(**best_params)
     # Disable early stopping for final refit on full data (no eval_set)
     if model_name in ("XGBoost", "LightGBM"):
         best_pipeline.set_params(model__early_stopping_rounds=None)
-    elif model_name == "CatBoost":
-        best_pipeline.set_params(model__od_type=None, model__od_wait=None)
     best_pipeline.fit(X, y)
 
     return best_pipeline, best_raw_params, best_cv_auc
 
 
-def _suggest_params_from_dict(params_dict, model_name, balanced=False):
+def _suggest_params_from_dict(params_dict, model_name):
     """Convert Optuna's flat best_params dict back to pipeline param format."""
     mapped = {}
     for key, val in params_dict.items():
@@ -394,7 +416,7 @@ def _suggest_params_from_dict(params_dict, model_name, balanced=False):
 # ---------------------------------------------------------------------------
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
-                            oot_year=None, balanced=False, remove_late_rounds=True):
+                            oot_year=None, remove_late_rounds=True):
     """Train all batch models with cross-validation and Optuna hyperparameter tuning.
 
     For each model:
@@ -451,7 +473,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
                 tuned_pipeline, best_params, tuned_cv_auc = optuna_tune(
                     pipeline, X_train, y_train, name,
-                    n_trials=N_OPTUNA_TRIALS, balanced=balanced,
+                    n_trials=N_OPTUNA_TRIALS,
                     groups=groups_train,
                 )
 
@@ -463,8 +485,6 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     # Disable early stopping for full fit (no eval_set)
                     if name in ("XGBoost", "LightGBM"):
                         pipeline.set_params(model__early_stopping_rounds=None)
-                    elif name == "CatBoost":
-                        pipeline.set_params(model__od_type=None, model__od_wait=None)
                     pipeline.fit(X_train, y_train)
                     best_params = {}
                     print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")
@@ -541,7 +561,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     final_pipeline, _, _ = optuna_tune(
         best_base_pipeline, all_X, all_y, best_model_name,
-        n_trials=N_OPTUNA_TRIALS, balanced=balanced, groups=all_groups,
+        n_trials=N_OPTUNA_TRIALS, groups=all_groups,
     )
 
     with mlflow.start_run(run_name=f"batch_{best_model_name}_final"):

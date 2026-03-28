@@ -9,7 +9,6 @@ from sklearn.preprocessing import StandardScaler
 from feature_engine.imputation import ArbitraryNumberImputer
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
 from imblearn.ensemble import BalancedRandomForestClassifier
 from imblearn.pipeline import Pipeline as ImbPipeline
 
@@ -18,14 +17,13 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 # Batch models
 # ---------------------------------------------------------------------------
 
-def get_batch_models(balanced=False):
+def get_batch_models():
     """Return dict of {name: sklearn Pipeline} for batch candidate models.
 
-    Candidates: LogisticRegression, RandomForest, BalancedRandomForest,
-                XGBoost, CatBoost.
+    Candidates: LogisticRegression, LightGBM, BalancedRandomForest, XGBoost.
+    LogisticRegression always uses class_weight='balanced'; boosting models
+    do not — they handle imbalance through their own adaptive reweighting.
     """
-    class_weight = "balanced" if balanced else None
-
     candidates = {
         "LogisticRegression": Pipeline([
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
@@ -35,7 +33,7 @@ def get_batch_models(balanced=False):
                 max_iter=1000,
                 tol=1e-3,
                 random_state=42,
-                class_weight=class_weight,
+                class_weight="balanced",
             )),
         ]),
         "LightGBM": Pipeline([
@@ -46,7 +44,6 @@ def get_batch_models(balanced=False):
                 learning_rate=0.1,
                 random_state=42,
                 n_jobs=-1,
-                is_unbalance=balanced,
                 device="gpu",
                 verbosity=-1,
             )),
@@ -68,23 +65,10 @@ def get_batch_models(balanced=False):
                 learning_rate=0.1,
                 random_state=42,
                 n_jobs=-1,
-                scale_pos_weight=10 if balanced else 1,
                 eval_metric="logloss",
                 verbosity=0,
                 device="cuda",
                 tree_method="hist",
-            )),
-        ]),
-        "CatBoost": Pipeline([
-            ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
-            ("model", CatBoostClassifier(
-                iterations=500,
-                depth=6,
-                learning_rate=0.1,
-                random_seed=42,
-                verbose=0,
-                task_type="GPU",
-                **({"auto_class_weights": "Balanced"} if balanced else {}),
             )),
         ]),
     }
@@ -96,7 +80,7 @@ def get_batch_models(balanced=False):
 # Online models
 # ---------------------------------------------------------------------------
 
-def get_online_models(balanced=False):
+def get_online_models():
     """Return dict of {name: model_config} for online learning candidates.
 
     Candidates:
@@ -107,9 +91,8 @@ def get_online_models(balanced=False):
       - StreamingLogisticRegression — pure-Python SGD logistic regression
 
     Each entry has 'type' ('sklearn' or 'streaming') and the model/factory.
+    SGD-based models always use class_weight='balanced'.
     """
-    class_weight = "balanced" if balanced else None
-
     candidates = {
         "SGDClassifier": {
             "type": "sklearn",
@@ -118,7 +101,7 @@ def get_online_models(balanced=False):
                 ("model", SGDClassifier(
                     loss="modified_huber",
                     random_state=42,
-                    class_weight=class_weight,
+                    class_weight="balanced",
                     max_iter=5000,
                     tol=1e-3,
                 )),
@@ -131,7 +114,7 @@ def get_online_models(balanced=False):
                 ("model", SGDClassifier(
                     loss="log_loss",
                     random_state=42,
-                    class_weight=class_weight,
+                    class_weight="balanced",
                     max_iter=5000,
                     tol=1e-3,
                 )),
