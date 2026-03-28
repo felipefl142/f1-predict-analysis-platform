@@ -18,41 +18,35 @@ from ml.timefm_predictor import TIMESFM_AVAILABLE
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
-def _load_champion_model():
-    from ml.predict import load_best_model
-    return load_best_model("f1_champion")
-
-
-@st.cache_resource
-def _load_team_model():
-    from ml.predict import load_best_model
-    return load_best_model("f1_constructor_champion")
-
-
-@st.cache_resource
-def _load_departure_model():
-    from ml.predict import load_best_model
-    return load_best_model("f1_departure")
+def _load_model_by_run(run_id):
+    from ml.predict import load_model_by_run_id
+    return load_model_by_run_id(run_id)
 
 
 @st.cache_data(ttl=3600)
-def _get_champion_predictions(year):
+def _list_models(experiment_name):
+    from ml.predict import list_batch_models
+    return list_batch_models(experiment_name)
+
+
+@st.cache_data(ttl=3600)
+def _get_champion_predictions(year, run_id):
     from ml.predict import predict_champions
-    model, _ = _load_champion_model()
+    model = _load_model_by_run(run_id)
     return predict_champions(year, model)
 
 
 @st.cache_data(ttl=3600)
-def _get_team_predictions(year):
+def _get_team_predictions(year, run_id):
     from ml.predict import predict_teams
-    model, _ = _load_team_model()
+    model = _load_model_by_run(run_id)
     return predict_teams(year, model)
 
 
 @st.cache_data(ttl=3600)
-def _get_departure_predictions(year):
+def _get_departure_predictions(year, run_id):
     from ml.predict import predict_departures
-    model, _ = _load_departure_model()
+    model = _load_model_by_run(run_id)
     return predict_departures(year, model)
 
 
@@ -108,6 +102,23 @@ def _get_timesfm_departures(year):
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _model_selector(experiment_name, key_suffix):
+    """Render a selectbox for batch model selection. Returns selected run_id or None."""
+    models = _list_models(experiment_name)
+    if not models:
+        return None
+    # Default to first final model, else first model
+    default_idx = next((i for i, m in enumerate(models) if m["is_final"]), 0)
+    selected = st.selectbox(
+        "Model",
+        models,
+        index=default_idx,
+        format_func=lambda m: m["label"],
+        key=f"model_select_{key_suffix}",
+    )
+    return selected["run_id"] if selected else None
+
 
 def _available_years(abt_filename: str) -> list[int]:
     """Return sorted (desc) list of years present in a gold ABT."""
@@ -230,11 +241,18 @@ def _render_champion_predictions():
         if TIMESFM_AVAILABLE:
             show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False)
 
+    run_id = None
+    if not use_online:
+        run_id = _model_selector("f1_champion", "champ")
+        if run_id is None:
+            st.info("No batch models found. Train models first: `python -m ml.champion_model`")
+            return
+
     try:
         if use_online:
             data = _get_champion_predictions_online(selected_year)
         else:
-            data = _get_champion_predictions(selected_year)
+            data = _get_champion_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
         if use_online:
@@ -316,11 +334,18 @@ def _render_team_predictions():
         if TIMESFM_AVAILABLE:
             show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_teams")
 
+    run_id = None
+    if not use_online:
+        run_id = _model_selector("f1_constructor_champion", "teams")
+        if run_id is None:
+            st.info("No batch models found. Train models first: `python -m ml.team_model`")
+            return
+
     try:
         if use_online:
             data = _get_team_predictions_online(selected_year)
         else:
-            data = _get_team_predictions(selected_year)
+            data = _get_team_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
         if use_online:
@@ -407,11 +432,18 @@ def _render_departure_predictions():
         if TIMESFM_AVAILABLE:
             show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_departures")
 
+    run_id = None
+    if not use_online:
+        run_id = _model_selector("f1_departure", "departures")
+        if run_id is None:
+            st.info("No batch models found. Train models first: `python -m ml.departure_model`")
+            return
+
     try:
         if use_online:
             data = _get_departure_predictions_online(selected_year)
         else:
-            data = _get_departure_predictions(selected_year)
+            data = _get_departure_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
         if use_online:

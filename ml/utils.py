@@ -115,21 +115,26 @@ def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
 
 
 def _log_classification_metrics(y_true, y_prob, suffix):
-    """Log PR-AUC, F1, log loss, and Brier score for a single split."""
+    """Log PR-AUC, F1, log loss, and Brier score for a single split. Returns dict."""
     if len(np.unique(y_true)) < 2:
-        return
+        return {}
     y_pred = (y_prob >= 0.5).astype(int)
-    mlflow.log_metric(f"pr_auc_{suffix}", metrics.average_precision_score(y_true, y_prob))
-    mlflow.log_metric(f"f1_{suffix}", metrics.f1_score(y_true, y_pred))
-    mlflow.log_metric(f"log_loss_{suffix}", metrics.log_loss(y_true, y_prob))
-    mlflow.log_metric(f"brier_{suffix}", metrics.brier_score_loss(y_true, y_prob))
+    vals = {
+        f"pr_auc_{suffix}": metrics.average_precision_score(y_true, y_prob),
+        f"f1_{suffix}": metrics.f1_score(y_true, y_pred),
+        f"log_loss_{suffix}": metrics.log_loss(y_true, y_prob),
+        f"brier_{suffix}": metrics.brier_score_loss(y_true, y_prob),
+    }
+    for k, v in vals.items():
+        mlflow.log_metric(k, v)
+    return vals
 
 
 def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
                    y_oot=None, y_oot_prob=None):
     """Plot ROC + Precision-Recall curves and log metrics to MLFlow."""
     if len(np.unique(y_train)) < 2:
-        return None, None, None
+        return None, None, None, {}
 
     # --- ROC metrics ---
     auc_train = metrics.roc_auc_score(y_train, y_train_prob)
@@ -165,10 +170,11 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
         ap_oot = metrics.average_precision_score(y_oot, y_oot_prob)
 
     # --- Extra metrics (PR-AUC, F1, log loss, Brier) ---
-    _log_classification_metrics(y_train, y_train_prob, "train")
-    _log_classification_metrics(y_test, y_test_prob, "test")
+    extra = {}
+    extra.update(_log_classification_metrics(y_train, y_train_prob, "train"))
+    extra.update(_log_classification_metrics(y_test, y_test_prob, "test"))
     if y_oot is not None and y_oot_prob is not None:
-        _log_classification_metrics(y_oot, y_oot_prob, "oot")
+        extra.update(_log_classification_metrics(y_oot, y_oot_prob, "oot"))
 
     # --- Plot ROC + PR side by side ---
     fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 5), dpi=100)
@@ -203,7 +209,7 @@ def log_roc_curves(y_train, y_train_prob, y_test, y_test_prob,
     plt.close(fig)
     mlflow.log_artifact(curves_path)
 
-    return auc_train, auc_test, auc_oot
+    return auc_train, auc_test, auc_oot, extra
 
 
 def _log_feature_importance_chart(fi_series, model_name):
@@ -498,7 +504,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 y_test_prob = pipeline.predict_proba(X_test)[:, 1]
                 y_oot_prob = pipeline.predict_proba(X_oot)[:, 1] if len(X_oot) > 0 else None
 
-                auc_train, auc_test, auc_oot = log_roc_curves(
+                auc_train, auc_test, auc_oot, extra_metrics = log_roc_curves(
                     y_train, y_train_prob,
                     y_test, y_test_prob,
                     y_oot if y_oot_prob is not None else None,
@@ -533,6 +539,12 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     "auc_train": auc_train,
                     "auc_test": auc_test,
                     "auc_oot": auc_oot,
+                    "pr_auc_test": extra_metrics.get("pr_auc_test"),
+                    "pr_auc_oot": extra_metrics.get("pr_auc_oot"),
+                    "log_loss_test": extra_metrics.get("log_loss_test"),
+                    "log_loss_oot": extra_metrics.get("log_loss_oot"),
+                    "brier_test": extra_metrics.get("brier_test"),
+                    "brier_oot": extra_metrics.get("brier_oot"),
                     "run_id": mlflow.active_run().info.run_id,
                 })
         except Exception as e:
@@ -549,8 +561,12 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     mlflow.MlflowClient().set_tag(best_run_id, "best_model", "true")
 
-    print(f"\n  Batch model comparison:")
-    print(comparison.to_string(index=False))
+    auc_cols = ["model", "mode", "cv_auc", "tuned_cv_auc", "auc_train", "auc_test", "auc_oot"]
+    extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
+    print(f"\n  Batch model comparison (AUC):")
+    print(comparison[auc_cols].to_string(index=False))
+    print(f"\n  Batch model comparison (extra metrics):")
+    print(comparison[[c for c in extra_cols if c in comparison.columns]].to_string(index=False))
     print(f"\n  Best batch model: {best_model_name} (by {score_col})")
 
     # Retrain best model on ALL data with Optuna tuning
@@ -695,7 +711,7 @@ def train_and_compare_online(df, target_col, id_cols, experiment_name, candidate
                     X_oot, y_oot, features,
                 )
 
-            auc_train, auc_test, auc_oot = log_roc_curves(
+            auc_train, auc_test, auc_oot, extra_metrics = log_roc_curves(
                 y_train, y_train_prob,
                 y_test, y_test_prob,
                 y_oot if y_oot_prob is not None else None,
@@ -708,6 +724,12 @@ def train_and_compare_online(df, target_col, id_cols, experiment_name, candidate
                 "auc_train": auc_train,
                 "auc_test": auc_test,
                 "auc_oot": auc_oot,
+                "pr_auc_test": extra_metrics.get("pr_auc_test"),
+                "pr_auc_oot": extra_metrics.get("pr_auc_oot"),
+                "log_loss_test": extra_metrics.get("log_loss_test"),
+                "log_loss_oot": extra_metrics.get("log_loss_oot"),
+                "brier_test": extra_metrics.get("brier_test"),
+                "brier_oot": extra_metrics.get("brier_oot"),
                 "run_id": mlflow.active_run().info.run_id,
             })
 
@@ -721,8 +743,12 @@ def train_and_compare_online(df, target_col, id_cols, experiment_name, candidate
     mlflow.MlflowClient().set_tag(best_run_id, "best_model", "true")
     mlflow.MlflowClient().set_tag(best_run_id, "learning_mode", "online")
 
-    print(f"\n  Online model comparison:")
-    print(comparison.to_string(index=False))
+    auc_cols = ["model", "mode", "auc_train", "auc_test", "auc_oot"]
+    extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
+    print(f"\n  Online model comparison (AUC):")
+    print(comparison[auc_cols].to_string(index=False))
+    print(f"\n  Online model comparison (extra metrics):")
+    print(comparison[[c for c in extra_cols if c in comparison.columns]].to_string(index=False))
     print(f"\n  Best online model: {best_model_name} (by {score_col})")
 
     # Save best online model for adaptive predict-then-learn at inference time

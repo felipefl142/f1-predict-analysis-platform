@@ -49,6 +49,50 @@ def load_best_model(experiment_name):
     return model, run.info.run_id
 
 
+def load_model_by_run_id(run_id):
+    """Load any sklearn model from MLflow by its run_id."""
+    mlflow.set_tracking_uri(_get_tracking_uri())
+    model = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
+    return model
+
+
+def list_batch_models(experiment_name):
+    """List all batch model runs for an experiment. Returns list of dicts with
+    keys: model_name, run_id, auc_oot, auc_test, is_final."""
+    mlflow.set_tracking_uri(_get_tracking_uri())
+    client = mlflow.MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        return []
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string="tags.learning_mode != 'online'",
+        order_by=["start_time DESC"],
+    )
+
+    models = []
+    for run in runs:
+        model_type = run.data.params.get("model_type", "unknown")
+        is_final = run.data.tags.get("final_model") == "true"
+        auc_oot = run.data.metrics.get("auc_oot")
+        auc_test = run.data.metrics.get("auc_test")
+        label = f"{model_type} (final — retrained on all data)" if is_final else model_type
+        if auc_oot is not None:
+            label += f" | OOT AUC: {auc_oot:.4f}"
+        elif auc_test is not None:
+            label += f" | Test AUC: {auc_test:.4f}"
+        models.append({
+            "label": label,
+            "model_name": model_type,
+            "run_id": run.info.run_id,
+            "auc_oot": auc_oot,
+            "auc_test": auc_test,
+            "is_final": is_final,
+        })
+    return models
+
+
 def get_model_comparison(experiment_name):
     """Get comparison metrics for all models in an experiment."""
     mlflow.set_tracking_uri(_get_tracking_uri())
