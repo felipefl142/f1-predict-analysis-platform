@@ -56,23 +56,6 @@ def _get_model_comparison(experiment_name):
     return get_model_comparison(experiment_name)
 
 
-@st.cache_data(ttl=3600)
-def _get_champion_predictions_online(year):
-    from ml.predict import predict_champions_online
-    return predict_champions_online(year)
-
-
-@st.cache_data(ttl=3600)
-def _get_team_predictions_online(year):
-    from ml.predict import predict_teams_online
-    return predict_teams_online(year)
-
-
-@st.cache_data(ttl=3600)
-def _get_departure_predictions_online(year):
-    from ml.predict import predict_departures_online
-    return predict_departures_online(year)
-
 
 @st.cache_data(ttl=3600)
 def _get_timesfm_champions(year):
@@ -233,32 +216,20 @@ def _render_champion_predictions():
     years = _available_years("abt_champions_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_champ")
-    with col2:
-        show_tfm = False
-        if TIMESFM_AVAILABLE:
-            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False)
+    show_tfm = False
+    if TIMESFM_AVAILABLE:
+        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False)
 
-    run_id = None
-    if not use_online:
-        run_id = _model_selector("f1_champion", "champ")
-        if run_id is None:
-            st.info("No batch models found. Train models first: `python -m ml.champion_model`")
-            return
+    run_id = _model_selector("f1_champion", "champ")
+    if run_id is None:
+        st.info("No models found. Train models first: `python -m ml.champion_model`")
+        return
 
     try:
-        if use_online:
-            data = _get_champion_predictions_online(selected_year)
-        else:
-            data = _get_champion_predictions(selected_year, run_id)
+        data = _get_champion_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        if use_online:
-            st.info("Train online models first: `python -m ml.champion_model`")
-        else:
-            st.info("Run the ETL pipeline and train the models first.")
+        st.info("Run the ETL pipeline and train the models first.")
         return
 
     if data.empty:
@@ -287,10 +258,9 @@ def _render_champion_predictions():
         for _, row in plot[["driverid", "team_color"]].drop_duplicates().iterrows()
     }
 
-    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_champion", "label", color_map,
-        title=f"{selected_year} Championship Win Probability ({model_label})",
+        title=f"{selected_year} Championship Win Probability",
         y_label="Win Probability",
     )
 
@@ -326,32 +296,20 @@ def _render_team_predictions():
     years = _available_years("abt_teams_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_teams")
-    with col2:
-        show_tfm = False
-        if TIMESFM_AVAILABLE:
-            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_teams")
+    show_tfm = False
+    if TIMESFM_AVAILABLE:
+        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_teams")
 
-    run_id = None
-    if not use_online:
-        run_id = _model_selector("f1_constructor_champion", "teams")
-        if run_id is None:
-            st.info("No batch models found. Train models first: `python -m ml.team_model`")
-            return
+    run_id = _model_selector("f1_constructor_champion", "teams")
+    if run_id is None:
+        st.info("No models found. Train models first: `python -m ml.team_model`")
+        return
 
     try:
-        if use_online:
-            data = _get_team_predictions_online(selected_year)
-        else:
-            data = _get_team_predictions(selected_year, run_id)
+        data = _get_team_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        if use_online:
-            st.info("Train online models first: `python -m ml.team_model`")
-        else:
-            st.info("Run the ETL pipeline and train the models first.")
+        st.info("Run the ETL pipeline and train the models first.")
         return
 
     if data.empty:
@@ -377,10 +335,9 @@ def _render_team_predictions():
     plot["label"] = plot["teamid"].map(team_names)
     color_map = {name: get_team_color(name) for name in plot["label"].unique()}
 
-    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_constructor_champion", "label", color_map,
-        title=f"{selected_year} Constructor Championship Probability ({model_label})",
+        title=f"{selected_year} Constructor Championship Probability",
         y_label="Win Probability",
     )
 
@@ -424,32 +381,20 @@ def _render_departure_predictions():
     years = _available_years("abt_departures_inseason.parquet")
     selected_year = st.selectbox("Season", years, index=0)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        use_online = st.toggle("Use adaptive (online) model", value=False, key="online_departures")
-    with col2:
-        show_tfm = False
-        if TIMESFM_AVAILABLE:
-            show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_departures")
+    show_tfm = False
+    if TIMESFM_AVAILABLE:
+        show_tfm = st.toggle("Overlay TimesFM zero-shot forecast", value=False, key="tfm_departures")
 
-    run_id = None
-    if not use_online:
-        run_id = _model_selector("f1_departure", "departures")
-        if run_id is None:
-            st.info("No batch models found. Train models first: `python -m ml.departure_model`")
-            return
+    run_id = _model_selector("f1_departure", "departures")
+    if run_id is None:
+        st.info("No models found. Train models first: `python -m ml.departure_model`")
+        return
 
     try:
-        if use_online:
-            data = _get_departure_predictions_online(selected_year)
-        else:
-            data = _get_departure_predictions(selected_year, run_id)
+        data = _get_departure_predictions(selected_year, run_id)
     except Exception as e:
         st.error(f"Could not load predictions: {e}")
-        if use_online:
-            st.info("Train online models first: `python -m ml.departure_model`")
-        else:
-            st.info("Run the ETL pipeline and train the models first.")
+        st.info("Run the ETL pipeline and train the models first.")
         return
 
     if data.empty:
@@ -478,10 +423,9 @@ def _render_departure_predictions():
         for _, row in plot[["driverid", "team_color"]].drop_duplicates().iterrows()
     }
 
-    model_label = "Online (adaptive)" if use_online else "Batch"
     fig = _line_chart(
         plot, "dt_ref", "prob_departure", "label", color_map,
-        title=f"{selected_year} Driver Departure Probability ({model_label})",
+        title=f"{selected_year} Driver Departure Probability",
         y_label="Departure Probability",
     )
 

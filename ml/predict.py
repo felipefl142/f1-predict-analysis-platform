@@ -2,18 +2,12 @@
 
 All predict_* functions return one row per (entity, race_date) for the given
 season, enabling line charts that show how probabilities evolve race by race.
-
-Online (adaptive) predict functions load a saved online model, learn from
-completed seasons after its training cutoff, then predict the target year.
 """
 
-import copy
 import os
-import pickle
 
 import duckdb
 import mlflow
-import numpy as np
 import pandas as pd
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -37,7 +31,7 @@ def load_best_model(experiment_name):
 
     runs = client.search_runs(
         experiment_ids=[experiment.experiment_id],
-        filter_string="tags.final_model = 'true' AND tags.learning_mode != 'online'",
+        filter_string="tags.final_model = 'true'",
         order_by=["start_time DESC"],
         max_results=1,
     )
@@ -67,7 +61,7 @@ def list_batch_models(experiment_name):
 
     runs = client.search_runs(
         experiment_ids=[experiment.experiment_id],
-        filter_string="tags.learning_mode != 'online'",
+        filter_string="",
         order_by=["start_time DESC"],
     )
 
@@ -296,166 +290,3 @@ def predict_departures(year: int | None = None, model=None) -> pd.DataFrame:
     )
     result["year"] = year
     return result.sort_values(["dt_ref", "prob_departure"], ascending=[True, False])
-
-
-# ---------------------------------------------------------------------------
-# Online (adaptive) models — predict-then-learn
-# ---------------------------------------------------------------------------
-
-def load_best_online_model(experiment_name):
-    """Load the best online model (pickle artifact) from a given MLFlow experiment.
-
-    Returns (model_info dict, run_id) or (None, None) if not found.
-    """
-    mlflow.set_tracking_uri(_get_tracking_uri())
-    client = mlflow.MlflowClient()
-    experiment = client.get_experiment_by_name(experiment_name)
-    if experiment is None:
-        return None, None
-
-    runs = client.search_runs(
-        experiment_ids=[experiment.experiment_id],
-        filter_string="tags.final_model = 'true' AND tags.learning_mode = 'online'",
-        order_by=["start_time DESC"],
-        max_results=1,
-    )
-    if not runs:
-        return None, None
-
-    run = runs[0]
-    local_dir = client.download_artifacts(run.info.run_id, "model")
-    pkl_path = os.path.join(local_dir, "online_model.pkl")
-    with open(pkl_path, "rb") as f:
-        model_info = pickle.load(f)
-
-    return model_info, run.info.run_id
-
-
-def _online_learn(model_info, X, y):
-    """Update an online model with new labeled data."""
-    if model_info["type"] == "sklearn":
-        pipeline = model_info["model"]
-        scaler = pipeline.named_steps["scaler"]
-        model = pipeline.named_steps["model"]
-        X_scaled = scaler.transform(X.fillna(-10000))
-        model.partial_fit(X_scaled, y.values, classes=np.array([0, 1]))
-    else:
-        model = model_info["model"]
-        X_filled = X.fillna(-10000)
-        for i in range(len(X_filled)):
-            model.learn_one(X_filled.iloc[i].to_dict(), int(y.iloc[i]))
-
-
-def _online_predict(model_info, X):
-    """Get probability predictions from an online model."""
-    if model_info["type"] == "sklearn":
-        pipeline = model_info["model"]
-        scaler = pipeline.named_steps["scaler"]
-        model = pipeline.named_steps["model"]
-        X_scaled = scaler.transform(X.fillna(-10000))
-        # SGDClassifier decision margins can be extreme (±600+), making
-        # predict_proba/sigmoid saturate to 0/1.  Normalize margins to
-        # zero-mean unit-variance before applying sigmoid so the output
-        # spans a useful probability range.
-        if hasattr(model, "decision_function"):
-            raw = model.decision_function(X_scaled)
-            std = raw.std()
-            if std > 0:
-                raw = (raw - raw.mean()) / std
-            return 1.0 / (1.0 + np.exp(-np.clip(raw, -10, 10)))
-        return model.predict_proba(X_scaled)[:, 1]
-    else:
-        model = model_info["model"]
-        X_filled = X.fillna(-10000)
-        probs = []
-        for i in range(len(X_filled)):
-            p = model.predict_proba_one(X_filled.iloc[i].to_dict())
-            probs.append(p.get(1, 0.0))
-        return np.array(probs)
-
-
-def _predict_online_generic(abt_filename, target_col, id_col, prob_col,
-                             experiment_name, year, meta_merge=None):
-    """Generic adaptive online prediction for any target.
-
-    1. Loads saved online model (trained on data < training cutoff).
-    2. Learns from all completed seasons between cutoff and prediction year.
-    3. Predicts the requested year.
-    """
-    model_info, run_id = load_best_online_model(experiment_name)
-    if model_info is None:
-        raise ValueError(f"No online model for '{experiment_name}'. Train online models first.")
-
-    # Deep copy so cached/shared references are not mutated
-    model_info = copy.deepcopy(model_info)
-
-    # Load full ABT
-    con = duckdb.connect()
-    abt_path = os.path.join(GOLD_DIR, abt_filename)
-    abt = con.execute(
-        f"SELECT * FROM read_parquet('{abt_path}') ORDER BY dt_ref"
-    ).fetchdf()
-    con.close()
-
-    from ml.utils import get_feature_columns
-    features = get_feature_columns(abt, exclude_cols=[id_col])
-
-    abt["year"] = pd.to_datetime(abt["dt_ref"]).dt.year
-
-    # Get training cutoff from MLflow run params
-    client = mlflow.MlflowClient()
-    run_data = client.get_run(run_id)
-    train_max_year = int(run_data.data.params.get("train_max_year", 0))
-
-    # Learn from completed seasons after training cutoff
-    learn_data = abt[(abt["year"] > train_max_year) & (abt["year"] < year)]
-    learn_data = learn_data.sort_values("dt_ref")
-    if not learn_data.empty:
-        _online_learn(model_info, learn_data[features], learn_data[target_col])
-
-    # Predict for target year
-    pred_data = abt[abt["year"] == year]
-    if pred_data.empty:
-        return pd.DataFrame()
-
-    probs = _online_predict(model_info, pred_data[features])
-
-    # Build result with same columns as batch predict functions
-    result = pred_data[["dt_ref", id_col]].copy()
-    result[prob_col] = probs
-    for col in ("season_race_number", "season_fraction", "team_name"):
-        if col in pred_data.columns:
-            result[col] = pred_data[col].values
-
-    result["year"] = year
-
-    if meta_merge is not None:
-        result = meta_merge(result)
-
-    return result.sort_values(["dt_ref", prob_col], ascending=[True, False])
-
-
-def predict_champions_online(year: int) -> pd.DataFrame:
-    """Race-by-race championship predictions using adaptive online learning."""
-    return _predict_online_generic(
-        "abt_champions_inseason.parquet", "fl_champion", "driverid",
-        "prob_champion", "f1_champion", year,
-        meta_merge=lambda df: df.merge(_driver_meta(), on="driverid", how="left"),
-    )
-
-
-def predict_teams_online(year: int) -> pd.DataFrame:
-    """Race-by-race constructor championship predictions using adaptive online learning."""
-    return _predict_online_generic(
-        "abt_teams_inseason.parquet", "fl_constructor_champion", "teamid",
-        "prob_constructor_champion", "f1_constructor_champion", year,
-    )
-
-
-def predict_departures_online(year: int) -> pd.DataFrame:
-    """Race-by-race departure predictions using adaptive online learning."""
-    return _predict_online_generic(
-        "abt_departures_inseason.parquet", "fl_departed", "driverid",
-        "prob_departure", "f1_departure", year,
-        meta_merge=lambda df: df.merge(_driver_meta(), on="driverid", how="left"),
-    )

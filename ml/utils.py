@@ -1,4 +1,4 @@
-"""Shared ML utilities: MLFlow setup, data splits, CV, Optuna hyperparam tuning, batch + online."""
+"""Shared ML utilities: MLFlow setup, data splits, CV, Optuna hyperparam tuning."""
 
 import copy
 import os
@@ -275,6 +275,8 @@ def _suggest_params(trial, model_name):
             "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
             "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
             "model__solver": "saga",
+            "model__penalty": "elasticnet",
+            "model__max_iter": 2500,
         }
     elif model_name == "BalancedRandomForest":
         return {
@@ -413,6 +415,8 @@ def _suggest_params_from_dict(params_dict, model_name):
     # Add fixed params not in the search space
     if model_name == "LogisticRegression":
         mapped["model__solver"] = "saga"
+        mapped["model__penalty"] = "elasticnet"
+        mapped["model__max_iter"] = 2500
 
     return mapped
 
@@ -588,201 +592,5 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
         mlflow.set_tag("best_model", "true")
         mlflow.set_tag("final_model", "true")
         mlflow.set_tag("learning_mode", "batch")
-
-    return comparison, best_model_name
-
-
-# ---------------------------------------------------------------------------
-# Online training
-# ---------------------------------------------------------------------------
-
-def _train_sklearn_online(pipeline, X_train, y_train, X_test, y_test,
-                          X_oot, y_oot, features, classes):
-    """Train an sklearn model with partial_fit, simulating streaming data."""
-    from sklearn.utils.class_weight import compute_class_weight
-
-    scaler = pipeline.named_steps["scaler"]
-    model = pipeline.named_steps["model"]
-
-    # partial_fit does not accept class_weight='balanced'; convert to sample weights
-    if getattr(model, "class_weight", None) == "balanced":
-        model.set_params(class_weight=None)
-        cw = compute_class_weight("balanced", classes=classes, y=y_train)
-        weight_map = dict(zip(classes, cw))
-        sample_weights = y_train.map(weight_map).values
-    else:
-        sample_weights = None
-
-    X_train_scaled = scaler.fit_transform(X_train.fillna(-10000))
-
-    batch_size = max(1, len(X_train_scaled) // 50)
-    for start in range(0, len(X_train_scaled), batch_size):
-        end = min(start + batch_size, len(X_train_scaled))
-        X_batch = X_train_scaled[start:end]
-        y_batch = y_train.iloc[start:end]
-        sw_batch = sample_weights[start:end] if sample_weights is not None else None
-        model.partial_fit(X_batch, y_batch, classes=classes, sample_weight=sw_batch)
-
-    X_test_scaled = scaler.transform(X_test.fillna(-10000))
-    y_train_prob = model.predict_proba(X_train_scaled)[:, 1]
-    y_test_prob = model.predict_proba(X_test_scaled)[:, 1]
-
-    y_oot_prob = None
-    if len(X_oot) > 0:
-        X_oot_scaled = scaler.transform(X_oot.fillna(-10000))
-        y_oot_prob = model.predict_proba(X_oot_scaled)[:, 1]
-
-    return y_train_prob, y_test_prob, y_oot_prob
-
-
-def _train_streaming_online(model_factory, X_train, y_train, X_test, y_test,
-                            X_oot, y_oot, features):
-    """Train a streaming model one sample at a time."""
-    model = model_factory()
-
-    X_train_filled = X_train.fillna(-10000)
-    for i in range(len(X_train_filled)):
-        x = X_train_filled.iloc[i].to_dict()
-        y = int(y_train.iloc[i])
-        model.learn_one(x, y)
-
-    def predict_proba_batch(model, X_df):
-        X_filled = X_df.fillna(-10000)
-        probs = []
-        for i in range(len(X_filled)):
-            x = X_filled.iloc[i].to_dict()
-            p = model.predict_proba_one(x)
-            probs.append(p.get(1, 0.0))
-        return np.array(probs)
-
-    y_train_prob = predict_proba_batch(model, X_train)
-    y_test_prob = predict_proba_batch(model, X_test)
-
-    y_oot_prob = None
-    if len(X_oot) > 0:
-        y_oot_prob = predict_proba_batch(model, X_oot)
-
-    return y_train_prob, y_test_prob, y_oot_prob, model
-
-
-def train_and_compare_online(df, target_col, id_cols, experiment_name, candidates,
-                             oot_year=None, remove_late_rounds=True):
-    """Train all online candidate models, log to MLFlow, return comparison."""
-    setup_mlflow(experiment_name)
-    features = get_feature_columns(df, exclude_cols=id_cols)
-    df_train, df_test, df_oot, oot_year = split_data(
-        df, target_col, id_cols, oot_year,
-        remove_late_rounds=remove_late_rounds,
-    )
-
-    df_train = df_train.sort_values("dt_ref")
-    df_test = df_test.sort_values("dt_ref")
-    df_oot = df_oot.sort_values("dt_ref")
-
-    X_train, y_train = df_train[features], df_train[target_col]
-    X_test, y_test = df_test[features], df_test[target_col]
-    X_oot, y_oot = df_oot[features], df_oot[target_col]
-
-    classes = np.array([0, 1])
-    results = []
-
-    for name, config in candidates.items():
-        print(f"  [ONLINE] Training {name}...")
-
-        with mlflow.start_run(run_name=f"online_{name}"):
-            mlflow.log_param("model_type", name)
-            mlflow.log_param("learning_mode", "online")
-            mlflow.log_param("n_features", len(features))
-            mlflow.log_param("n_train_rows", len(X_train))
-            mlflow.log_param("n_test_rows", len(X_test))
-            mlflow.log_param("n_oot_rows", len(X_oot))
-            mlflow.log_param("oot_year", oot_year)
-
-            if config["type"] == "sklearn":
-                pipeline = config["model"]
-                y_train_prob, y_test_prob, y_oot_prob = _train_sklearn_online(
-                    pipeline, X_train, y_train, X_test, y_test,
-                    X_oot, y_oot, features, classes,
-                )
-            elif config["type"] == "streaming":
-                y_train_prob, y_test_prob, y_oot_prob, _ = _train_streaming_online(
-                    config["model_factory"],
-                    X_train, y_train, X_test, y_test,
-                    X_oot, y_oot, features,
-                )
-
-            auc_train, auc_test, auc_oot, extra_metrics = log_roc_curves(
-                y_train, y_train_prob,
-                y_test, y_test_prob,
-                y_oot if y_oot_prob is not None else None,
-                y_oot_prob,
-            )
-
-            results.append({
-                "model": name,
-                "mode": "online",
-                "auc_train": auc_train,
-                "auc_test": auc_test,
-                "auc_oot": auc_oot,
-                "pr_auc_test": extra_metrics.get("pr_auc_test"),
-                "pr_auc_oot": extra_metrics.get("pr_auc_oot"),
-                "log_loss_test": extra_metrics.get("log_loss_test"),
-                "log_loss_oot": extra_metrics.get("log_loss_oot"),
-                "brier_test": extra_metrics.get("brier_test"),
-                "brier_oot": extra_metrics.get("brier_oot"),
-                "run_id": mlflow.active_run().info.run_id,
-            })
-
-    comparison = pd.DataFrame(results)
-
-    score_col = "auc_oot" if comparison["auc_oot"].notna().any() else "auc_test"
-    best_idx = comparison[score_col].fillna(0).idxmax()
-    best_model_name = comparison.loc[best_idx, "model"]
-    best_run_id = comparison.loc[best_idx, "run_id"]
-
-    mlflow.MlflowClient().set_tag(best_run_id, "best_model", "true")
-    mlflow.MlflowClient().set_tag(best_run_id, "learning_mode", "online")
-
-    auc_cols = ["model", "mode", "auc_train", "auc_test", "auc_oot"]
-    extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
-    print(f"\n  Online model comparison (AUC):")
-    print(comparison[auc_cols].to_string(index=False))
-    print(f"\n  Online model comparison (extra metrics):")
-    print(comparison[[c for c in extra_cols if c in comparison.columns]].to_string(index=False))
-    print(f"\n  Best online model: {best_model_name} (by {score_col})")
-
-    # Save best online model for adaptive predict-then-learn at inference time
-    print(f"  Saving best online model ({best_model_name}) for adaptive prediction...")
-    best_config = candidates[best_model_name]
-    train_max_year = int(pd.to_datetime(df_train["dt_ref"]).dt.year.max())
-
-    if best_config["type"] == "sklearn":
-        fresh_pipeline = clone(best_config["model"])
-        _train_sklearn_online(
-            fresh_pipeline, X_train, y_train, X_test, y_test,
-            X_oot, y_oot, features, classes,
-        )
-        save_obj = {"type": "sklearn", "model": fresh_pipeline}
-    else:
-        _, _, _, fresh_model = _train_streaming_online(
-            best_config["model_factory"],
-            X_train, y_train, X_test, y_test,
-            X_oot, y_oot, features,
-        )
-        save_obj = {"type": "streaming", "model": fresh_model}
-
-    import pickle
-    pkl_path = "/tmp/online_model.pkl"
-    with open(pkl_path, "wb") as f:
-        pickle.dump(save_obj, f)
-
-    with mlflow.start_run(run_name=f"online_{best_model_name}_final"):
-        mlflow.log_param("model_type", f"{best_model_name}_final")
-        mlflow.log_param("learning_mode", "online")
-        mlflow.log_param("trained_on", "train_split")
-        mlflow.log_param("train_max_year", train_max_year)
-        mlflow.log_artifact(pkl_path, artifact_path="model")
-        mlflow.set_tag("final_model", "true")
-        mlflow.set_tag("learning_mode", "online")
 
     return comparison, best_model_name
