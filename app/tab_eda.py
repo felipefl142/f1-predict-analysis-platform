@@ -1,10 +1,12 @@
 """Tab 2: Exploratory Data Analysis — Interactive F1 visualizations."""
 
+import os
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from app.helpers import get_duckdb_connection, BRONZE_PATH
+from app.helpers import get_duckdb_connection, get_team_color, BRONZE_PATH, SILVER_DIR
 
 
 @st.cache_data(ttl=3600)
@@ -28,6 +30,7 @@ def render_eda():
     viz = st.selectbox(
         "Select visualization",
         [
+            "Feature Explorer",
             "Points Distribution by Season",
             "Win Rate Over Career",
             "Team Comparison",
@@ -37,7 +40,9 @@ def render_eda():
         ],
     )
 
-    if viz == "Points Distribution by Season":
+    if viz == "Feature Explorer":
+        _feature_explorer()
+    elif viz == "Points Distribution by Season":
         _points_distribution(df)
     elif viz == "Win Rate Over Career":
         _win_rate(df)
@@ -49,6 +54,142 @@ def render_eda():
         _career_trajectories(df)
     elif viz == "Season Points Progression":
         _season_progression(df)
+
+
+_FEATURE_GROUPS = {
+    "Points": ["total_points", "total_points_race", "total_points_sprint"],
+    "Wins": ["qtd_wins", "qtd_wins_race", "qtd_wins_sprint"],
+    "Podiums": ["qtd_podiums", "qtd_podiums_race", "qtd_podiums_sprint"],
+    "Top 5": ["qtd_top5", "qtd_top5_race", "qtd_top5_sprint"],
+    "Poles": ["qtd_poles", "qtd_poles_race", "qtd_poles_sprint"],
+    "Pole-to-Win": ["qtd_pole_win", "qtd_pole_win_race", "qtd_pole_win_sprint"],
+    "Avg Grid Position": ["avg_grid", "avg_grid_race", "avg_grid_sprint"],
+    "Avg Finish Position": ["avg_position", "avg_position_race", "avg_position_sprint"],
+    "Avg Overtakes": ["avg_overtakes", "avg_overtakes_race", "avg_overtakes_sprint"],
+    "Sessions": ["qtd_sessions", "qtd_finished", "qtd_race", "qtd_sprint",
+                  "qtd_sessions_with_points", "qtd_sessions_with_overtake"],
+    "Weather": ["avg_air_temp", "avg_track_temp", "avg_humidity", "avg_pressure",
+                 "avg_wind_speed", "qtd_sessions_rain", "pct_sessions_rain"],
+}
+
+_WINDOWS = ["life", "last10", "last20", "last40"]
+
+
+@st.cache_data(ttl=3600)
+def _load_features():
+    fs_path = os.path.join(SILVER_DIR, "fs_driver_all.parquet")
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        SELECT fs.*, b.full_name, b.team_name
+        FROM read_parquet('{fs_path}') fs
+        LEFT JOIN (
+            SELECT driverid, full_name, team_name,
+                   ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
+            FROM read_parquet('{BRONZE_PATH}')
+        ) b ON fs.driverid = b.driverid AND b.rn = 1
+    """).fetchdf()
+    con.close()
+    df["dt_ref"] = pd.to_datetime(df["dt_ref"])
+    df["year"] = df["dt_ref"].dt.year
+    df["full_name"] = df["full_name"].fillna(df["driverid"])
+    return df
+
+
+def _feature_explorer():
+    st.subheader("Feature Explorer")
+    st.caption("Browse feature-store metrics race by race. Metrics are point-in-time "
+               "correct (computed from data before each race).")
+
+    try:
+        fs = _load_features()
+    except Exception as e:
+        st.error(f"Could not load feature store: {e}")
+        st.info("Run the ETL pipeline first: `python -m etl.run_pipeline`")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        group = st.selectbox("Metric group", list(_FEATURE_GROUPS.keys()), key="fe_group")
+    with col2:
+        window = st.selectbox("Window", _WINDOWS, key="fe_window",
+                              format_func=lambda w: {"life": "Career", "last10": "Last 10",
+                                                     "last20": "Last 20", "last40": "Last 40"}[w])
+    with col3:
+        metrics_in_group = _FEATURE_GROUPS[group]
+        available = [f"{m}_{window}" for m in metrics_in_group if f"{m}_{window}" in fs.columns]
+        metric = st.selectbox("Metric", available, key="fe_metric",
+                              format_func=lambda c: c.replace(f"_{window}", ""))
+
+    if not metric:
+        st.warning("No matching metric found for this group/window combination.")
+        return
+
+    mode = st.radio("View by", ["Drivers", "Teams"], horizontal=True, key="fe_mode")
+
+    # --- Season range ---
+    years = sorted(fs["year"].unique())
+    min_yr, max_yr = int(years[0]), int(years[-1])
+
+    full_career = st.checkbox("Full career", value=False, key="fe_full_career")
+    if full_career:
+        yr_lo, yr_hi = min_yr, max_yr
+    else:
+        yr_lo, yr_hi = st.slider("Seasons", min_yr, max_yr,
+                                 (max_yr, max_yr), key="fe_years")
+
+    fs_filtered = fs[(fs["year"] >= yr_lo) & (fs["year"] <= yr_hi)].sort_values("dt_ref")
+    year_label = f"{yr_lo}—{yr_hi}" if yr_lo != yr_hi else str(yr_lo)
+    metric_label = metric.replace(f"_{window}", "")
+
+    if mode == "Drivers":
+        all_drivers = sorted(fs_filtered["full_name"].unique())
+        default = all_drivers[:5] if len(all_drivers) > 5 else all_drivers
+        selected = st.multiselect("Select drivers", all_drivers, default=default,
+                                  key="fe_drivers")
+        if not selected:
+            return
+        plot = fs_filtered[fs_filtered["full_name"].isin(selected)].copy()
+        if plot.empty:
+            st.warning("No data for the selected drivers/seasons.")
+            return
+        color_map = {
+            row["full_name"]: get_team_color(row["team_name"])
+            for _, row in plot[["full_name", "team_name"]].drop_duplicates().iterrows()
+        }
+        fig = px.line(
+            plot, x="dt_ref", y=metric, color="full_name",
+            markers=True, color_discrete_map=color_map,
+            labels={"dt_ref": "Race Date", metric: metric_label,
+                    "full_name": "Driver"},
+            title=f"{metric_label} ({window}) — {year_label}",
+        )
+    else:
+        team_agg = (
+            fs_filtered.groupby(["dt_ref", "team_name"])[metric]
+            .mean()
+            .reset_index()
+        )
+        all_teams = sorted(team_agg["team_name"].dropna().unique())
+        default_teams = all_teams[:5] if len(all_teams) > 5 else all_teams
+        selected_teams = st.multiselect("Select teams", all_teams,
+                                        default=default_teams, key="fe_teams")
+        if not selected_teams:
+            return
+        plot = team_agg[team_agg["team_name"].isin(selected_teams)].copy()
+        if plot.empty:
+            st.warning("No data for the selected teams/seasons.")
+            return
+        color_map = {t: get_team_color(t) for t in selected_teams}
+        fig = px.line(
+            plot, x="dt_ref", y=metric, color="team_name",
+            markers=True, color_discrete_map=color_map,
+            labels={"dt_ref": "Race Date", metric: metric_label,
+                    "team_name": "Team"},
+            title=f"{metric_label} ({window}) — {year_label} (team avg)",
+        )
+
+    fig.update_layout(hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _points_distribution(df):

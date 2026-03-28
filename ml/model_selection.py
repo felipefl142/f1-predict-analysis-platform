@@ -82,9 +82,9 @@ def get_batch_models(balanced=False):
                 depth=6,
                 learning_rate=0.1,
                 random_seed=42,
-                auto_class_weights="Balanced" if balanced else None,
                 verbose=0,
                 task_type="GPU",
+                **({"auto_class_weights": "Balanced"} if balanced else {}),
             )),
         ]),
     }

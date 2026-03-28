@@ -4,6 +4,7 @@ Uses the in-season ABT (one row per driver per race) so predictions can be
 plotted as a time series evolving race by race through the season.
 """
 
+import argparse
 import os
 
 import duckdb
@@ -15,9 +16,10 @@ BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_departures_inseason.parquet")
 
 
-def train_departure_models():
+def train_departure_models(balanced=False):
     print("=" * 60)
     print("F1 Driver Departure Prediction — Multi-Model Training (in-season ABT)")
+    print(f"  balanced={balanced}")
     print("=" * 60)
 
     con = duckdb.connect()
@@ -29,21 +31,21 @@ def train_departure_models():
 
     # --- Batch models ---
     print("\n--- BATCH MODELS ---")
-    batch_candidates = get_batch_models(balanced=True)
+    batch_candidates = get_batch_models(balanced=balanced)
     batch_comparison, best_batch = train_and_compare_batch(
         df=df,
         target_col="fl_departed",
         id_cols=["driverid"],
         experiment_name="f1_departure",
         candidates=batch_candidates,
-        balanced=True,
+        balanced=balanced,
         remove_late_rounds=False,
         oot_year=2025,
     )
 
     # --- Online models ---
     print("\n--- ONLINE MODELS ---")
-    online_candidates = get_online_models(balanced=True)
+    online_candidates = get_online_models(balanced=balanced)
     online_comparison, best_online = train_and_compare_online(
         df=df,
         target_col="fl_departed",
@@ -59,4 +61,7 @@ def train_departure_models():
 
 
 if __name__ == "__main__":
-    train_departure_models()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--balanced", action="store_true", help="Use class-balanced models")
+    args = parser.parse_args()
+    train_departure_models(balanced=args.balanced)
