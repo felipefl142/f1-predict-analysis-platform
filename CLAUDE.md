@@ -29,7 +29,7 @@ python -m etl.run_pipeline --years 2020 2021 2022 2023 2024 2025
 python -m etl.run_pipeline --years 2018 2019 2020 2021 2022 2023 2024 2025 --force
 
 # Run individual ETL steps
-python -m etl.collect --years 2024 2025 --modes R S       # collect raw data
+python -m etl.collect --years 2024 2025 --modes R Q S     # collect raw data
 python -m etl.collect --years 2018 2019 2020 --force      # re-collect with --force to overwrite
 python -m etl.bronze                                       # raw → bronze
 python -m etl.silver                                       # bronze → silver (feature store)
@@ -58,7 +58,7 @@ docker-compose up
 
 - **SQL engine**: DuckDB for all transformations. SQL files in `etl/sql/` use `read_parquet()` to access data.
 - **Storage**: Parquet files only. No database server. Bronze uses `union_by_name=true` to handle mixed schemas (pre/post weather).
-- **Feature store**: Point-in-time correct — `fs_driver.sql` uses `r.event_date < d.dt_ref` so features include current-season data up to (but not including) each race date. Features evolve race-by-race within a season.
+- **Feature store**: Point-in-time correct — `fs_driver.sql` uses `r.event_date < d.dt_ref` so features include current-season data up to (but not including) each race date. Features evolve race-by-race within a season. Includes qualifying features (avg position, poles, Q3 reach rate) from collected Q sessions.
 - **Weather features**: Collected from FastF1 (air/track temp, humidity, pressure, wind speed/direction, rainfall). Available from 2018+, NULL for earlier years. Aggregated per session in collect, per window in feature store.
 - **ML tracking**: MLFlow with SQLite backend (`mlflow.db`) and local artifact store (`mlruns/`). Each prediction task (champion, team, departure) is a separate experiment with multiple model runs.
 - **ML models**: Batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost). Hyperparameter tuning via Optuna (TPE sampler, median pruner).

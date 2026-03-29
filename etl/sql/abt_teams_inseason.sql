@@ -145,6 +145,20 @@ team_features AS (
         SUM(f.total_points_race_last20) AS sum_points_race_last20,
         AVG(f.avg_position_race_last20) AS avg_position_race_last20,
 
+        SUM(f.qtd_quali_life)              AS sum_quali_life,
+        AVG(f.avg_quali_position_life)     AS avg_quali_position_life,
+        SUM(f.qtd_quali_pole_life)         AS sum_quali_pole_life,
+        SUM(f.qtd_quali_top3_life)         AS sum_quali_top3_life,
+        SUM(f.qtd_quali_top10_life)        AS sum_quali_top10_life,
+
+        SUM(f.qtd_quali_last10)            AS sum_quali_last10,
+        AVG(f.avg_quali_position_last10)   AS avg_quali_position_last10,
+        SUM(f.qtd_quali_pole_last10)       AS sum_quali_pole_last10,
+
+        SUM(f.qtd_quali_last20)            AS sum_quali_last20,
+        AVG(f.avg_quali_position_last20)   AS avg_quali_position_last20,
+        SUM(f.qtd_quali_pole_last20)       AS sum_quali_pole_last20,
+
         COUNT(DISTINCT dar.driverid) AS num_drivers
 
     FROM race_calendar rc

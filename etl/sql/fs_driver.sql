@@ -123,6 +123,13 @@ tb_stats AS (
         AVG(CASE WHEN mode IN ('Race') THEN grid_position - position END) AS avg_overtakes_race_{suffix},
         AVG(CASE WHEN mode IN ('Sprint Race', 'Sprint') THEN grid_position - position END) AS avg_overtakes_sprint_{suffix},
 
+        -- Qualifying
+        SUM(CASE WHEN mode = 'Qualifying' THEN 1 ELSE 0 END) AS qtd_quali_{suffix},
+        AVG(CASE WHEN mode = 'Qualifying' THEN position END) AS avg_quali_position_{suffix},
+        SUM(CASE WHEN mode = 'Qualifying' AND position = 1 THEN 1 ELSE 0 END) AS qtd_quali_pole_{suffix},
+        SUM(CASE WHEN mode = 'Qualifying' AND position <= 3 THEN 1 ELSE 0 END) AS qtd_quali_top3_{suffix},
+        SUM(CASE WHEN mode = 'Qualifying' AND position <= 10 THEN 1 ELSE 0 END) AS qtd_quali_top10_{suffix},
+
         -- Weather
         AVG(air_temp) AS avg_air_temp_{suffix},
         AVG(track_temp) AS avg_track_temp_{suffix},

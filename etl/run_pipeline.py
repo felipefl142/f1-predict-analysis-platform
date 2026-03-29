@@ -12,7 +12,7 @@ def run_pipeline(years=None, modes=None, force=False):
     if years is None:
         years = list(range(2020, 2026))
     if modes is None:
-        modes = ["R", "S"]
+        modes = ["R", "Q", "S"]
 
     print("=" * 60)
     print("F1 Analytics — Full ETL Pipeline")
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--years", "-y", nargs="+", type=int, default=list(range(2020, 2026))
     )
-    parser.add_argument("--modes", "-m", nargs="+", default=["R", "S"])
+    parser.add_argument("--modes", "-m", nargs="+", default=["R", "Q", "S"])
     parser.add_argument("--force", "-f", action="store_true", help="Re-collect even if files exist")
     args = parser.parse_args()
 

@@ -77,7 +77,10 @@ class CollectResults:
         df["Location"] = session.event["Location"]
 
         # Aggregate weather data to session-level summary
-        weather = getattr(session, "weather_data", None)
+        try:
+            weather = session.weather_data
+        except Exception:
+            weather = None
         if weather is not None and not weather.empty:
             df["AirTemp"] = weather["AirTemp"].mean()
             df["TrackTemp"] = weather["TrackTemp"].mean()
