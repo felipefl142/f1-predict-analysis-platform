@@ -26,8 +26,8 @@ def get_batch_models():
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
             ("scaler", StandardScaler()),
             ("model", LogisticRegression(
+                penalty="l1",
                 solver="saga",
-                l1_ratio=0.5,
                 max_iter=10000,
                 tol=1e-3,
                 random_state=42,
@@ -53,6 +53,7 @@ def get_batch_models():
                 n_estimators=300,
                 max_depth=5,
                 min_samples_leaf=50,
+                max_samples=0.7,
                 random_state=42,
                 n_jobs=-1,
             )),

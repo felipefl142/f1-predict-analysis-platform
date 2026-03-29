@@ -230,23 +230,44 @@ def _log_feature_importance_chart(fi_series, model_name):
 # Cross-validation
 # ---------------------------------------------------------------------------
 
-def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
-    """Run stratified K-fold CV and return mean/std AUC scores.
+class ExpandingWindowCV:
+    """Expanding-window time-series CV splitter based on year groups.
 
-    When groups is provided, uses StratifiedGroupKFold so the same entity
-    (e.g. driver) never appears in both train and validation within a fold.
+    Given sorted unique years [Y0, Y1, ..., Yn], generates n_splits folds
+    using the last n_splits years as validation sets:
+        Fold 1: train = years up to Y(n - n_splits),  val = Y(n - n_splits + 1)
+        Fold 2: train = years up to Y(n - n_splits+1), val = Y(n - n_splits + 2)
+        ...
+        Fold n_splits: train = years up to Y(n-1),     val = Y(n)
     """
-    # Cap folds so each validation fold has at least one positive example
-    n_positives = int(y.sum())
-    n_folds = min(n_folds, max(2, n_positives))
 
-    if groups is not None:
-        # Also cap by number of groups with positive labels
-        pos_groups = groups[y == 1].nunique()
-        n_folds = min(n_folds, max(2, pos_groups))
-        cv = model_selection.StratifiedGroupKFold(n_splits=n_folds)
-    else:
-        cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    def __init__(self, years, n_splits=N_CV_FOLDS):
+        self.years = years
+        unique = sorted(years.unique())
+        # Need at least 1 training year + n_splits validation years
+        max_splits = len(unique) - 1
+        self.n_splits = min(n_splits, max(2, max_splits))
+        self._unique_years = unique
+
+    def split(self, X=None, y=None, groups=None):
+        unique = self._unique_years
+        for i in range(self.n_splits):
+            val_year = unique[len(unique) - self.n_splits + i]
+            train_mask = self.years < val_year
+            val_mask = self.years == val_year
+            yield np.where(train_mask)[0], np.where(val_mask)[0]
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
+
+def cross_validate_model(pipeline, X, y, years, n_folds=N_CV_FOLDS):
+    """Run expanding-window time-series CV and return mean/std AP scores.
+
+    Uses ExpandingWindowCV: each fold trains on all years up to year Y
+    and validates on year Y+1, with an expanding training window.
+    """
+    cv = ExpandingWindowCV(years, n_splits=n_folds)
 
     # GPU models manage their own parallelism; running folds in parallel causes
     # multiple workers to compete for VRAM and OOM-abort. Use n_jobs=1 for GPU models.
@@ -257,7 +278,7 @@ def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
     n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
         pipeline, X, y, cv=cv, scoring="average_precision", n_jobs=n_jobs,
-        groups=groups, error_score=0.0,
+        error_score=0.0,
     )
     # NaN occurs when a validation fold has only one class; treat as baseline
     baseline = y.mean() if hasattr(y, "mean") else 0.0
@@ -274,7 +295,7 @@ def _suggest_params(trial, model_name):
     if model_name == "LogisticRegression":
         return {
             "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
-            "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
+            "model__penalty": "l1",
             "model__solver": "saga",
             "model__max_iter": 10000,
         }
@@ -294,7 +315,7 @@ def _suggest_params(trial, model_name):
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
             "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
+            "model__min_child_samples": trial.suggest_int("min_child_samples", 50, 200),
             "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__early_stopping_rounds": 50,
@@ -306,7 +327,7 @@ def _suggest_params(trial, model_name):
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
             "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_weight": trial.suggest_int("min_child_weight", 10, 50),
+            "model__min_child_weight": trial.suggest_int("min_child_weight", 30, 150),
             "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
@@ -315,26 +336,15 @@ def _suggest_params(trial, model_name):
     return {}
 
 
-def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
-                groups=None):
+def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS):
     """Run Optuna Bayesian optimization with TPE sampler and median pruner.
 
-    When groups is provided, uses StratifiedGroupKFold so the same entity
-    never appears in both train and validation within a fold.
+    Uses ExpandingWindowCV for temporal cross-validation.
 
     Returns:
         (best_pipeline, best_params, best_cv_auc)
     """
-    # Cap folds so each validation fold has at least one positive example
-    n_positives = int(y.sum())
-    n_folds = min(N_CV_FOLDS, max(2, n_positives))
-
-    if groups is not None:
-        pos_groups = groups[y == 1].nunique()
-        n_folds = min(n_folds, max(2, pos_groups))
-        cv = model_selection.StratifiedGroupKFold(n_splits=n_folds)
-    else:
-        cv = model_selection.StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    cv = ExpandingWindowCV(years, n_splits=N_CV_FOLDS)
 
     def objective(trial):
         params = _suggest_params(trial, model_name)
@@ -346,7 +356,7 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
 
         # Use CV with pruning: evaluate fold-by-fold
         scores = []
-        for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y, groups)):
+        for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y)):
             X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
             y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
 
@@ -448,12 +458,20 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     X_test, y_test = df_test[features], df_test[target_col]
     X_oot, y_oot = df_oot[features], df_oot[target_col]
 
-    # Groups for group-aware CV (prevent same entity in train + validation)
-    groups_train = df_train[id_cols[0]] if id_cols else None
+    # Year series for expanding-window temporal CV
+    years_train = pd.to_datetime(df_train["dt_ref"]).dt.year.reset_index(drop=True)
 
     results = []
 
+    # Compute scale_pos_weight for gradient boosting models
+    n_pos = y_train.sum()
+    n_neg = len(y_train) - n_pos
+    scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+    print(f"  Class balance: {n_neg} neg / {n_pos} pos → scale_pos_weight={scale_pos_weight:.2f}")
+
     for name, pipeline in candidates.items():
+        if name in ("XGBoost", "LightGBM"):
+            pipeline.set_params(model__scale_pos_weight=scale_pos_weight)
         print(f"\n  [BATCH] Training {name}...")
         t_start = time.time()
         try:
@@ -468,9 +486,10 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 mlflow.log_param("oot_year", oot_year)
 
                 # --- Step 1: CV with default params ---
-                print(f"    CV ({N_CV_FOLDS}-fold) default params...")
+                n_folds_actual = ExpandingWindowCV(years_train).n_splits
+                print(f"    CV ({n_folds_actual}-fold expanding window) default params...")
                 cv_mean, cv_std, cv_scores = cross_validate_model(
-                    pipeline, X_train, y_train, groups=groups_train,
+                    pipeline, X_train, y_train, years=years_train,
                 )
                 mlflow.log_metric("cv_ap_mean", cv_mean)
                 mlflow.log_metric("cv_ap_std", cv_std)
@@ -482,8 +501,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
                 tuned_pipeline, best_params, tuned_cv_auc = optuna_tune(
                     pipeline, X_train, y_train, name,
+                    years=years_train,
                     n_trials=N_OPTUNA_TRIALS,
-                    groups=groups_train,
                 )
 
                 if tuned_cv_auc > cv_mean:
@@ -576,11 +595,11 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     print(f"  Retraining {best_model_name} on full dataset with Optuna tuning...")
     best_base_pipeline = candidates[best_model_name]
     all_X, all_y = df[features], df[target_col]
-    all_groups = df[id_cols[0]] if id_cols else None
+    all_years = pd.to_datetime(df["dt_ref"]).dt.year.reset_index(drop=True)
 
     final_pipeline, _, _ = optuna_tune(
         best_base_pipeline, all_X, all_y, best_model_name,
-        n_trials=N_OPTUNA_TRIALS, groups=all_groups,
+        years=all_years, n_trials=N_OPTUNA_TRIALS,
     )
 
     with mlflow.start_run(run_name=f"batch_{best_model_name}_final"):
