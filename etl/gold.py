@@ -26,7 +26,6 @@ ABTS = {
         "replacements": {
             "{silver_dir}": SILVER_DIR,
             "{bronze_path}": BRONZE_PATH,
-            "{constructors_csv}": CONSTRUCTORS_CSV,
         },
     },
     "abt_departures_inseason": {

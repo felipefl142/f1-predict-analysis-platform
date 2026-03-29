@@ -27,9 +27,8 @@ def get_batch_models():
             ("scaler", StandardScaler()),
             ("model", LogisticRegression(
                 solver="saga",
-                penalty="elasticnet",
                 l1_ratio=0.5,
-                max_iter=2500,
+                max_iter=10000,
                 tol=1e-3,
                 random_state=42,
                 class_weight="balanced",
@@ -38,9 +37,10 @@ def get_batch_models():
         "LightGBM": Pipeline([
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
             ("model", LGBMClassifier(
-                n_estimators=500,
-                max_depth=6,
-                learning_rate=0.1,
+                n_estimators=300,
+                max_depth=4,
+                learning_rate=0.05,
+                min_child_samples=20,
                 random_state=42,
                 n_jobs=-1,
                 device="gpu",
@@ -50,7 +50,8 @@ def get_batch_models():
         "BalancedRandomForest": ImbPipeline([
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
             ("model", BalancedRandomForestClassifier(
-                n_estimators=500,
+                n_estimators=300,
+                max_depth=5,
                 min_samples_leaf=50,
                 random_state=42,
                 n_jobs=-1,
@@ -59,9 +60,10 @@ def get_batch_models():
         "XGBoost": Pipeline([
             ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
             ("model", XGBClassifier(
-                n_estimators=500,
-                max_depth=6,
-                learning_rate=0.1,
+                n_estimators=300,
+                max_depth=4,
+                learning_rate=0.05,
+                min_child_weight=10,
                 random_state=42,
                 n_jobs=-1,
                 eval_metric="logloss",

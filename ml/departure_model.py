@@ -34,7 +34,7 @@ def train_departure_models():
         id_cols=["driverid"],
         experiment_name="f1_departure",
         candidates=batch_candidates,
-        remove_late_rounds=False,
+        remove_late_rounds=True,
         oot_year=2025,
     )
 

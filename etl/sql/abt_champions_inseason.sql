@@ -73,6 +73,19 @@ standings AS (
     GROUP BY year, dt_ref
 ),
 
+-- Driver standings at each event: position, gap to leader
+driver_standings AS (
+    SELECT
+        year,
+        dt_ref,
+        driverid,
+        cum_points,
+        RANK() OVER (PARTITION BY year, dt_ref ORDER BY cum_points DESC) AS standing_position,
+        MAX(cum_points) OVER (PARTITION BY year, dt_ref) - cum_points AS points_gap_to_leader,
+        ROUND(cum_points * 1.0 / NULLIF(MAX(cum_points) OVER (PARTITION BY year, dt_ref), 0), 4) AS points_pct_of_leader
+    FROM cumulative_points
+),
+
 -- First event where championship is clinched
 clinch_event AS (
     SELECT
@@ -90,6 +103,9 @@ SELECT
     rc.season_race_number,
     rc.season_total_races,
     ROUND(rc.season_race_number * 1.0 / rc.season_total_races, 3) AS season_fraction,
+    COALESCE(ds.standing_position, 99) AS standing_position,
+    COALESCE(ds.points_gap_to_leader, 0) AS points_gap_to_leader,
+    COALESCE(ds.points_pct_of_leader, 0) AS points_pct_of_leader,
     CASE
         WHEN f.driverid = cl.champion_driverid AND f.dt_ref >= cl.clinch_date THEN 1
         ELSE 0
@@ -97,6 +113,8 @@ SELECT
 FROM read_parquet('{silver_dir}/fs_driver_all.parquet') f
 INNER JOIN race_calendar rc
     ON f.dt_ref = rc.dt_ref
+LEFT JOIN driver_standings ds
+    ON ds.driverid = f.driverid AND ds.dt_ref = f.dt_ref
 LEFT JOIN clinch_event cl
     ON EXTRACT(YEAR FROM f.dt_ref)::INT = cl.year
 WHERE f.dt_ref >= DATE '2000-01-01'

@@ -178,6 +178,7 @@ def _render_model_comparison_table(experiment_name):
         st.dataframe(
             comp.style.format({
                 c: "{:.4f}" for c in ["auc_train", "auc_test", "auc_oot",
+                                      "cv_ap", "tuned_cv_ap",
                                       "cv_auc", "tuned_cv_auc"] if c in comp.columns
             }),
             use_container_width=True,

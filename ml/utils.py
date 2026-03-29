@@ -256,11 +256,12 @@ def cross_validate_model(pipeline, X, y, n_folds=N_CV_FOLDS, groups=None):
                 or model_params.get("device") in ("cuda", "gpu"))
     n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
-        pipeline, X, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs,
+        pipeline, X, y, cv=cv, scoring="average_precision", n_jobs=n_jobs,
         groups=groups, error_score=0.0,
     )
-    # NaN occurs when a validation fold has only one class; treat as random (0.5)
-    cv_scores = np.where(np.isnan(cv_scores), 0.5, cv_scores)
+    # NaN occurs when a validation fold has only one class; treat as baseline
+    baseline = y.mean() if hasattr(y, "mean") else 0.0
+    cv_scores = np.where(np.isnan(cv_scores), baseline, cv_scores)
     return cv_scores.mean(), cv_scores.std(), cv_scores
 
 
@@ -275,38 +276,37 @@ def _suggest_params(trial, model_name):
             "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
             "model__l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
             "model__solver": "saga",
-            "model__penalty": "elasticnet",
-            "model__max_iter": 2500,
+            "model__max_iter": 10000,
         }
     elif model_name == "BalancedRandomForest":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 12),
-            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 20, 100),
+            "model__n_estimators": trial.suggest_int("n_estimators", 100, 500, step=100),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 6),
+            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 30, 150),
             "model__max_features": trial.suggest_categorical(
                 "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7],
             ),
         }
     elif model_name == "LightGBM":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 8),
+            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 5),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
             "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
+            "model__min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
             "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__early_stopping_rounds": 50,
         }
     elif model_name == "XGBoost":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 500, 5000, step=500),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 6),
+            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
+            "model__max_depth": trial.suggest_int("max_depth", 3, 5),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
             "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_weight": trial.suggest_int("min_child_weight", 3, 30),
+            "model__min_child_weight": trial.suggest_int("min_child_weight", 10, 50),
             "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
@@ -364,12 +364,12 @@ def optuna_tune(pipeline, X, y, model_name, n_trials=N_OPTUNA_TRIALS,
             cloned.fit(X_fold_train, y_fold_train, **fit_params)
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
             if y_fold_val.nunique() < 2:
-                # Validation fold has only one class; treat as random performance
-                fold_auc = 0.5
+                # Validation fold has only one class; treat as baseline
+                fold_score = float(y_fold_val.mean()) if len(y_fold_val) > 0 else 0.0
             else:
-                fold_auc = metrics.roc_auc_score(y_fold_val, y_pred)
+                fold_score = metrics.average_precision_score(y_fold_val, y_pred)
 
-            scores.append(fold_auc)
+            scores.append(fold_score)
 
             # Report intermediate value for pruning
             trial.report(np.mean(scores), fold_idx)
@@ -415,8 +415,7 @@ def _suggest_params_from_dict(params_dict, model_name):
     # Add fixed params not in the search space
     if model_name == "LogisticRegression":
         mapped["model__solver"] = "saga"
-        mapped["model__penalty"] = "elasticnet"
-        mapped["model__max_iter"] = 2500
+        mapped["model__max_iter"] = 10000
 
     return mapped
 
@@ -473,11 +472,11 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 cv_mean, cv_std, cv_scores = cross_validate_model(
                     pipeline, X_train, y_train, groups=groups_train,
                 )
-                mlflow.log_metric("cv_auc_mean", cv_mean)
-                mlflow.log_metric("cv_auc_std", cv_std)
+                mlflow.log_metric("cv_ap_mean", cv_mean)
+                mlflow.log_metric("cv_ap_std", cv_std)
                 for i, score in enumerate(cv_scores):
                     mlflow.log_metric(f"cv_fold_{i}", score)
-                print(f"    Default CV AUC: {cv_mean:.4f} (+/- {cv_std:.4f})")
+                print(f"    Default CV AP: {cv_mean:.4f} (+/- {cv_std:.4f})")
 
                 # --- Step 2: Optuna tuning ---
                 print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
@@ -489,7 +488,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
                 if tuned_cv_auc > cv_mean:
                     pipeline = tuned_pipeline
-                    print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
+                    print(f"    Tuned CV AP: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
                 else:
                     tuned_cv_auc = cv_mean
                     # Disable early stopping for full fit (no eval_set)
@@ -497,9 +496,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                         pipeline.set_params(model__early_stopping_rounds=None)
                     pipeline.fit(X_train, y_train)
                     best_params = {}
-                    print(f"    Tuned CV AUC: {tuned_cv_auc:.4f} (kept defaults)")
+                    print(f"    Tuned CV AP: {tuned_cv_auc:.4f} (kept defaults)")
 
-                mlflow.log_metric("tuned_cv_auc", tuned_cv_auc)
+                mlflow.log_metric("tuned_cv_ap", tuned_cv_auc)
                 for param_key, param_val in best_params.items():
                     mlflow.log_param(f"best_{param_key}", param_val)
 
@@ -538,8 +537,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 results.append({
                     "model": name,
                     "mode": "batch",
-                    "cv_auc": cv_mean,
-                    "tuned_cv_auc": tuned_cv_auc,
+                    "cv_ap": cv_mean,
+                    "tuned_cv_ap": tuned_cv_auc,
                     "auc_train": auc_train,
                     "auc_test": auc_test,
                     "auc_oot": auc_oot,
@@ -557,19 +556,19 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     comparison = pd.DataFrame(results)
 
-    # Select best by OOT AUC, fallback to tuned CV AUC
-    score_col = "auc_oot" if comparison["auc_oot"].notna().any() else "tuned_cv_auc"
+    # Select best by OOT PR-AUC, fallback to tuned CV AP
+    score_col = "pr_auc_oot" if comparison["pr_auc_oot"].notna().any() else "tuned_cv_ap"
     best_idx = comparison[score_col].fillna(0).idxmax()
     best_model_name = comparison.loc[best_idx, "model"]
     best_run_id = comparison.loc[best_idx, "run_id"]
 
     mlflow.MlflowClient().set_tag(best_run_id, "best_model", "true")
 
-    auc_cols = ["model", "mode", "cv_auc", "tuned_cv_auc", "auc_train", "auc_test", "auc_oot"]
+    auc_cols = ["model", "mode", "cv_ap", "tuned_cv_ap", "auc_train", "auc_test", "auc_oot"]
     extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
-    print(f"\n  Batch model comparison (AUC):")
+    print(f"\n  Batch model comparison (ROC-AUC):")
     print(comparison[auc_cols].to_string(index=False))
-    print(f"\n  Batch model comparison (extra metrics):")
+    print(f"\n  Batch model comparison (PR-AUC / calibration):")
     print(comparison[[c for c in extra_cols if c in comparison.columns]].to_string(index=False))
     print(f"\n  Best batch model: {best_model_name} (by {score_col})")
 

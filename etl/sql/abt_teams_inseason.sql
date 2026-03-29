@@ -1,7 +1,9 @@
 -- In-season ABT for constructor champion prediction.
 -- One row per (team, race_event) per season.
 -- Features are team-aggregated driver stats from the silver feature store at each race date.
--- Label: fl_constructor_champion = 1 for ALL rows of the eventual WCC team that season.
+-- Label: fl_constructor_champion = 1 only from the race where the constructor
+-- championship is mathematically clinched (leader's gap > max remaining points) onwards.
+-- Also includes team standing features (position, gap to leader).
 
 WITH race_calendar AS (
     SELECT
@@ -14,6 +16,87 @@ WITH race_calendar AS (
         FROM read_parquet('{bronze_path}')
         WHERE mode IN ('Race', 'Sprint Race', 'Sprint')
     )
+),
+
+-- Points per team per event
+team_event_points AS (
+    SELECT year, event_date, teamid, SUM(points) AS points
+    FROM read_parquet('{bronze_path}')
+    WHERE mode IN ('Race', 'Sprint Race', 'Sprint')
+    GROUP BY year, event_date, teamid
+),
+
+-- Max points any team scored at each event (for remaining-points calculation)
+event_max_team_points AS (
+    SELECT year, event_date, MAX(points) AS max_team_pts
+    FROM team_event_points
+    GROUP BY year, event_date
+),
+
+-- Max remaining points available after each event_date in the season
+remaining_points AS (
+    SELECT
+        e1.year,
+        e1.event_date AS dt_ref,
+        COALESCE(SUM(e2.max_team_pts) FILTER (WHERE e2.event_date > e1.event_date), 0) AS max_remaining_pts
+    FROM event_max_team_points e1
+    JOIN event_max_team_points e2 ON e1.year = e2.year
+    GROUP BY e1.year, e1.event_date
+),
+
+-- Cumulative points per team at each event_date
+cumulative_team_points AS (
+    SELECT
+        year,
+        event_date AS dt_ref,
+        teamid,
+        SUM(points) OVER (
+            PARTITION BY year, teamid ORDER BY event_date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS cum_points
+    FROM team_event_points
+),
+
+-- Team standings at each event: position, gap to leader
+team_standings AS (
+    SELECT
+        year,
+        dt_ref,
+        teamid,
+        cum_points,
+        RANK() OVER (PARTITION BY year, dt_ref ORDER BY cum_points DESC) AS team_standing_position,
+        MAX(cum_points) OVER (PARTITION BY year, dt_ref) - cum_points AS team_points_gap_to_leader,
+        ROUND(cum_points * 1.0 / NULLIF(MAX(cum_points) OVER (PARTITION BY year, dt_ref), 0), 4) AS team_points_pct_of_leader
+    FROM cumulative_team_points
+),
+
+-- At each event_date: gap between leading team and 2nd place team
+team_leader_gap AS (
+    SELECT
+        year,
+        dt_ref,
+        MAX(cum_points) - (
+            SELECT cp2.cum_points
+            FROM cumulative_team_points cp2
+            WHERE cp2.year = cp.year AND cp2.dt_ref = cp.dt_ref
+            ORDER BY cp2.cum_points DESC
+            LIMIT 1 OFFSET 1
+        ) AS leader_gap,
+        ARG_MAX(teamid, cum_points) AS leader_teamid
+    FROM cumulative_team_points cp
+    GROUP BY year, dt_ref
+),
+
+-- First event where constructor championship is mathematically clinched
+clinch_event AS (
+    SELECT
+        s.year,
+        s.leader_teamid AS champion_teamid,
+        MIN(s.dt_ref) AS clinch_date
+    FROM team_leader_gap s
+    JOIN remaining_points rp ON s.year = rp.year AND s.dt_ref = rp.dt_ref
+    WHERE s.leader_gap > rp.max_remaining_pts
+    GROUP BY s.year, s.leader_teamid
 ),
 
 driver_at_race AS (
@@ -75,46 +158,18 @@ team_features AS (
 )
 
 SELECT
-    tf.dt_ref,
-    tf.teamid,
-    tf.team_name,
-    tf.season_race_number,
-    tf.season_total_races,
-    tf.season_fraction,
-    tf.sum_sessions_life,
-    tf.avg_sessions_life,
-    tf.sum_wins_life,
-    tf.avg_wins_life,
-    tf.sum_podiums_life,
-    tf.avg_podiums_life,
-    tf.sum_points_life,
-    tf.avg_points_life,
-    tf.avg_position_life,
-    tf.avg_grid_life,
-    tf.sum_sessions_last10,
-    tf.sum_wins_last10,
-    tf.sum_podiums_last10,
-    tf.sum_points_last10,
-    tf.avg_position_last10,
-    tf.avg_grid_last10,
-    tf.sum_sessions_last20,
-    tf.sum_wins_last20,
-    tf.sum_podiums_last20,
-    tf.sum_points_last20,
-    tf.avg_position_last20,
-    tf.avg_grid_last20,
-    tf.sum_wins_race_last20,
-    tf.sum_podiums_race_last20,
-    tf.sum_points_race_last20,
-    tf.avg_position_race_last20,
-    tf.num_drivers,
-    COALESCE(cc.is_champion, 0) AS fl_constructor_champion
+    tf.*,
+    ts.team_standing_position,
+    ts.team_points_gap_to_leader,
+    ts.team_points_pct_of_leader,
+    CASE
+        WHEN tf.teamid = cl.champion_teamid AND tf.dt_ref >= cl.clinch_date THEN 1
+        ELSE 0
+    END AS fl_constructor_champion
 FROM team_features tf
-LEFT JOIN (
-    SELECT teamid, year, 1 AS is_champion
-    FROM read_csv('{constructors_csv}', header=true, auto_detect=true)
-) cc
-    ON tf.teamid = cc.teamid
-    AND tf.year = cc.year
+LEFT JOIN team_standings ts
+    ON tf.teamid = ts.teamid AND tf.dt_ref = ts.dt_ref
+LEFT JOIN clinch_event cl
+    ON tf.year = cl.year
 WHERE tf.year >= 2000
 ORDER BY tf.dt_ref DESC, tf.teamid
