@@ -154,51 +154,32 @@ def predict_champions(year: int, model=None) -> pd.DataFrame:
         model, _ = load_best_model("f1_champion")
 
     con = duckdb.connect()
-    silver = os.path.join(SILVER_DIR, "fs_driver_all.parquet")
+    abt_path = os.path.join(GOLD_DIR, "abt_champions_inseason.parquet")
 
     in_season_count = con.execute(f"""
-        SELECT COUNT(*) FROM read_parquet('{silver}')
+        SELECT COUNT(*) FROM read_parquet('{abt_path}')
         WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
     """).fetchone()[0]
 
     if in_season_count > 0:
-        race_cal = con.execute(f"""
-            SELECT event_date AS dt_ref,
-                   ROW_NUMBER() OVER (ORDER BY event_date) AS season_race_number,
-                   COUNT(*) OVER () AS season_total_races
-            FROM (SELECT DISTINCT event_date FROM read_parquet('{BRONZE_PATH}')
-                  WHERE mode IN ('Race','Sprint Race','Sprint') AND year = {year})
-        """).fetchdf()
-        features_df = con.execute(f"""
-            SELECT f.* FROM read_parquet('{silver}') f
-            WHERE EXTRACT(YEAR FROM f.dt_ref)::INT = {year}
+        abt = con.execute(f"""
+            SELECT * FROM read_parquet('{abt_path}')
+            WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year}
         """).fetchdf()
     else:
-        race_cal = con.execute(f"""
-            SELECT event_date AS dt_ref,
-                   ROW_NUMBER() OVER (ORDER BY event_date) AS season_race_number,
-                   COUNT(*) OVER () AS season_total_races
-            FROM (SELECT DISTINCT event_date FROM read_parquet('{BRONZE_PATH}')
-                  WHERE mode IN ('Race','Sprint Race','Sprint') AND year = {year - 1})
-        """).fetchdf()
-        features_df = con.execute(f"""
-            SELECT f.* FROM read_parquet('{silver}') f
-            WHERE EXTRACT(YEAR FROM f.dt_ref)::INT = {year - 1}
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY f.driverid ORDER BY f.dt_ref DESC) = 1
+        abt = con.execute(f"""
+            SELECT * FROM read_parquet('{abt_path}')
+            WHERE EXTRACT(YEAR FROM dt_ref)::INT = {year - 1}
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY dt_ref DESC) = 1
         """).fetchdf()
 
     con.close()
 
-    features_df = features_df.merge(race_cal, on="dt_ref", how="left")
-    features_df["season_fraction"] = (
-        features_df["season_race_number"] / features_df["season_total_races"]
-    ).round(3)
-
     feat_cols = _model_feature_cols(model)
-    features_df["prob_champion"] = model.predict_proba(features_df[feat_cols])[:, 1]
+    abt["prob_champion"] = model.predict_proba(abt[feat_cols])[:, 1]
 
-    result = features_df[["dt_ref", "driverid", "prob_champion",
-                           "season_race_number", "season_fraction"]].merge(
+    result = abt[["dt_ref", "driverid", "prob_champion",
+                   "season_race_number", "season_fraction"]].merge(
         _driver_meta(), on="driverid", how="left"
     )
     result["year"] = year
