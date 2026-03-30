@@ -24,6 +24,7 @@ f1-analytics/
 ├── app/                    # Streamlit web application
 │   ├── main.py             # Entry point with tab layout
 │   ├── tab_predictions.py  # ML predictions tab
+│   ├── tab_model_comparison.py  # Side-by-side model comparison (ROC/PR curves, confusion matrices)
 │   ├── tab_eda.py          # Exploratory data analysis tab
 │   ├── tab_duckdb.py       # Interactive DuckDB SQL console (Ctrl+Enter to run)
 │   └── helpers.py          # Shared UI utilities
@@ -46,7 +47,7 @@ f1-analytics/
 │   ├── champion_model.py   # Champion prediction training
 │   ├── team_model.py       # Best team prediction training
 │   ├── departure_model.py  # Driver departure prediction training
-│   ├── model_selection.py  # Candidate model definitions (batch + online)
+│   ├── model_selection.py  # Candidate model definitions
 │   ├── predict.py          # Inference utilities
 │   ├── utils.py            # Training, splits, metrics, MLFlow setup
 │   ├── evaluate_timesfm.py # TimesFM zero-shot forecast evaluation
@@ -67,7 +68,7 @@ All tools are free and open source:
 - **Data collection**: [FastF1](https://github.com/theOehrly/Fast-F1) (results + weather data)
 - **SQL engine**: [DuckDB](https://duckdb.org/)
 - **Data processing**: pandas
-- **ML models**: scikit-learn, XGBoost, CatBoost, river (online learning)
+- **ML models**: scikit-learn, XGBoost, LightGBM
 - **Class balancing**: imbalanced-learn
 - **Hyperparameter tuning**: Optuna (TPE sampler, median pruner)
 - **Zero-shot forecasting**: TimesFM (separate venv)
@@ -132,7 +133,7 @@ python -m etl.gold
 
 ### Training ML Models
 
-Each prediction task trains and compares multiple batch models (Logistic Regression, Random Forest, XGBoost, CatBoost) and online models (SGDClassifier, streaming via river), with Optuna hyperparameter tuning. All runs are logged to MLFlow:
+Each prediction task trains and compares multiple batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost) with Optuna hyperparameter tuning. All runs are logged to MLFlow. Use `--nologreg` to skip LogisticRegression:
 
 ```bash
 # Champion prediction
@@ -165,9 +166,10 @@ Evaluate Google's TimesFM foundation model as a zero-shot forecaster on the same
 streamlit run app/main.py
 ```
 
-The app runs at `http://localhost:8501` and has three tabs:
+The app runs at `http://localhost:8501` and has four tabs:
 
-- **Predictions** — ML model predictions with model comparison
+- **Predictions** — ML model predictions with time-series charts
+- **Model Comparison** — Side-by-side metrics table, ROC/PR curves, and confusion matrices for all trained models
 - **EDA** — Interactive exploratory data analysis with Plotly charts
 - **DuckDB Console** — Run SQL queries directly against the Parquet data (Ctrl+Enter to execute, 13 example queries including weather analysis)
 

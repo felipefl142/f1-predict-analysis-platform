@@ -61,9 +61,9 @@ docker-compose up
 - **Feature store**: Point-in-time correct — `fs_driver.sql` uses `r.event_date < d.dt_ref` so features include current-season data up to (but not including) each race date. Features evolve race-by-race within a season. Includes qualifying features (avg position, poles, Q3 reach rate) from collected Q sessions.
 - **Weather features**: Collected from FastF1 (air/track temp, humidity, pressure, wind speed/direction, rainfall). Available from 2018+, NULL for earlier years. Aggregated per session in collect, per window in feature store.
 - **ML tracking**: MLFlow with SQLite backend (`mlflow.db`) and local artifact store (`mlruns/`). Each prediction task (champion, team, departure) is a separate experiment with multiple model runs.
-- **ML models**: Batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost). Hyperparameter tuning via Optuna (TPE sampler, median pruner).
-- **ABTs**: Two variants per target — end-of-year (one row per driver-year) and in-season (one row per driver-race, for time-series predictions).
-- **Web app**: Streamlit with 3 tabs (Predictions, EDA, DuckDB Console). DuckDB Console supports Ctrl+Enter to run queries. Models loaded inline via `@st.cache_resource`.
+- **ML models**: Batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost). Hyperparameter tuning via Optuna (TPE sampler, median pruner). Training scripts accept `--nologreg` to skip LogisticRegression. Departure model uses `scoring="roc_auc"` instead of default `"average_precision"`.
+- **ABTs**: Two variants per target — end-of-year (one row per driver-year) and in-season (one row per driver-race, for time-series predictions). Departure ABTs include departure-specific features (performance trends, teammate comparison, team tenure, driver age, career teams, seasons since last win/podium) computed in SQL.
+- **Web app**: Streamlit with 4 tabs (Predictions, Model Comparison, EDA, DuckDB Console). DuckDB Console supports Ctrl+Enter to run queries. Models loaded inline via `@st.cache_resource`.
 - **Charts**: Plotly for interactive visualizations.
 
 ## Tech Stack

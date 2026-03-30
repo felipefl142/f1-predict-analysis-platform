@@ -243,9 +243,9 @@ def _render_champion_predictions():
         .set_index("driverid")["full_name"].to_dict()
     )
     latest = data[data["dt_ref"] == data["dt_ref"].max()]
-    top3 = latest.nlargest(3, "prob_champion")["driverid"].tolist()
+    top5 = latest.nlargest(5, "prob_champion")["driverid"].tolist()
     selected = st.multiselect(
-        "Drivers", drivers, default=[d for d in top3 if d in drivers],
+        "Drivers", drivers, default=[d for d in top5 if d in drivers],
         format_func=lambda x: driver_names.get(x, x),
     )
     if not selected:
@@ -323,9 +323,9 @@ def _render_team_predictions():
         .set_index("teamid")["team_name"].to_dict()
     )
     latest = data[data["dt_ref"] == data["dt_ref"].max()]
-    top3 = latest.nlargest(3, "prob_constructor_champion")["teamid"].tolist()
+    top5 = latest.nlargest(5, "prob_constructor_champion")["teamid"].tolist()
     selected = st.multiselect(
-        "Teams", teams, default=[t for t in top3 if t in teams],
+        "Teams", teams, default=[t for t in top5 if t in teams],
         format_func=lambda x: team_names.get(x, x),
     )
     if not selected:
@@ -408,7 +408,7 @@ def _render_departure_predictions():
         .set_index("driverid")["full_name"].to_dict()
     )
     latest = data[data["dt_ref"] == data["dt_ref"].max()]
-    top5 = latest.nlargest(5, "prob_departure")["driverid"].tolist()
+    top5 = latest.nlargest(6, "prob_departure")["driverid"].tolist()
     selected = st.multiselect(
         "Drivers", drivers, default=[d for d in top5 if d in drivers],
         format_func=lambda x: driver_names.get(x, x),

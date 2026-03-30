@@ -21,13 +21,18 @@ st.markdown(
     "Inspired by [TeoMeWhy/f1-lake](https://github.com/TeoMeWhy/f1-lake)."
 )
 
-tab_pred, tab_eda, tab_sql = st.tabs(
-    [":crystal_ball: Predictions", ":bar_chart: EDA", ":duck: DuckDB Console"]
+tab_pred, tab_models, tab_eda, tab_sql = st.tabs(
+    [":crystal_ball: Predictions", ":microscope: Model Comparison",
+     ":bar_chart: EDA", ":duck: DuckDB Console"]
 )
 
 with tab_pred:
     from app.tab_predictions import render_predictions
     render_predictions()
+
+with tab_models:
+    from app.tab_model_comparison import render_model_comparison
+    render_model_comparison()
 
 with tab_eda:
     from app.tab_eda import render_eda

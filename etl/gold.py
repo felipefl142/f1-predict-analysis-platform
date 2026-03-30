@@ -11,6 +11,7 @@ GOLD_DIR = os.path.join(BASE_DIR, "data", "gold")
 SQL_DIR = os.path.join(os.path.dirname(__file__), "sql")
 CHAMPIONS_CSV = os.path.join(BASE_DIR, "data", "champions.csv")
 CONSTRUCTORS_CSV = os.path.join(BASE_DIR, "data", "constructors_champions.csv")
+DRIVERS_DOB_CSV = os.path.join(BASE_DIR, "data", "drivers_dob.csv")
 
 ABTS = {
     "abt_champions_inseason": {
@@ -28,11 +29,20 @@ ABTS = {
             "{bronze_path}": BRONZE_PATH,
         },
     },
+    "abt_departures": {
+        "sql_file": "abt_departures.sql",
+        "replacements": {
+            "{silver_dir}": SILVER_DIR,
+            "{bronze_path}": BRONZE_PATH,
+            "{drivers_dob_csv}": DRIVERS_DOB_CSV,
+        },
+    },
     "abt_departures_inseason": {
         "sql_file": "abt_departures_inseason.sql",
         "replacements": {
             "{silver_dir}": SILVER_DIR,
             "{bronze_path}": BRONZE_PATH,
+            "{drivers_dob_csv}": DRIVERS_DOB_CSV,
         },
     },
 }

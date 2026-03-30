@@ -261,11 +261,15 @@ class ExpandingWindowCV:
         return self.n_splits
 
 
-def cross_validate_model(pipeline, X, y, years, n_folds=N_CV_FOLDS):
-    """Run expanding-window time-series CV and return mean/std AP scores.
+def cross_validate_model(pipeline, X, y, years, n_folds=N_CV_FOLDS,
+                         scoring="average_precision"):
+    """Run expanding-window time-series CV and return mean/std scores.
 
     Uses ExpandingWindowCV: each fold trains on all years up to year Y
     and validates on year Y+1, with an expanding training window.
+
+    Args:
+        scoring: sklearn scoring string — "average_precision" or "roc_auc".
     """
     cv = ExpandingWindowCV(years, n_splits=n_folds)
 
@@ -277,7 +281,7 @@ def cross_validate_model(pipeline, X, y, years, n_folds=N_CV_FOLDS):
                 or model_params.get("device") in ("cuda", "gpu"))
     n_jobs = 1 if uses_gpu else -1
     cv_scores = model_selection.cross_val_score(
-        pipeline, X, y, cv=cv, scoring="average_precision", n_jobs=n_jobs,
+        pipeline, X, y, cv=cv, scoring=scoring, n_jobs=n_jobs,
         error_score=0.0,
     )
     # NaN occurs when a validation fold has only one class; treat as baseline
@@ -295,9 +299,9 @@ def _suggest_params(trial, model_name):
     if model_name == "LogisticRegression":
         return {
             "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
-            "model__penalty": "l1",
+            "model__l1_ratio": trial.suggest_float("l1_ratio", 0.2, 1.0),
             "model__solver": "saga",
-            "model__max_iter": 10000,
+            "model__max_iter": 3500,
         }
     elif model_name == "BalancedRandomForest":
         return {
@@ -333,18 +337,34 @@ def _suggest_params(trial, model_name):
             "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
             "model__early_stopping_rounds": 50,
         }
+    elif model_name == "AdaBoost":
+        return {
+            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
+            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 1.0, log=True),
+            "model__estimator__max_depth": trial.suggest_int("max_depth", 1, 4),
+        }
     return {}
 
 
-def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS):
+def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
+                scoring="average_precision"):
     """Run Optuna Bayesian optimization with TPE sampler and median pruner.
 
     Uses ExpandingWindowCV for temporal cross-validation.
+
+    Args:
+        scoring: "average_precision" or "roc_auc".
 
     Returns:
         (best_pipeline, best_params, best_cv_auc)
     """
     cv = ExpandingWindowCV(years, n_splits=N_CV_FOLDS)
+
+    _SCORE_FN = {
+        "average_precision": metrics.average_precision_score,
+        "roc_auc": metrics.roc_auc_score,
+    }
+    score_fn = _SCORE_FN[scoring]
 
     def objective(trial):
         params = _suggest_params(trial, model_name)
@@ -377,7 +397,7 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS):
                 # Validation fold has only one class; treat as baseline
                 fold_score = float(y_fold_val.mean()) if len(y_fold_val) > 0 else 0.0
             else:
-                fold_score = metrics.average_precision_score(y_fold_val, y_pred)
+                fold_score = score_fn(y_fold_val, y_pred)
 
             scores.append(fold_score)
 
@@ -418,14 +438,23 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS):
 
 def _suggest_params_from_dict(params_dict, model_name):
     """Convert Optuna's flat best_params dict back to pipeline param format."""
+    # AdaBoost's max_depth belongs to the base estimator, not AdaBoost itself
+    _NESTED_PARAMS = {
+        "AdaBoost": {"max_depth": "model__estimator__max_depth"},
+    }
+    nested = _NESTED_PARAMS.get(model_name, {})
+
     mapped = {}
     for key, val in params_dict.items():
-        mapped[f"model__{key}"] = val
+        if key in nested:
+            mapped[nested[key]] = val
+        else:
+            mapped[f"model__{key}"] = val
 
     # Add fixed params not in the search space
     if model_name == "LogisticRegression":
         mapped["model__solver"] = "saga"
-        mapped["model__max_iter"] = 10000
+        mapped["model__max_iter"] = 3500
 
     return mapped
 
@@ -435,7 +464,8 @@ def _suggest_params_from_dict(params_dict, model_name):
 # ---------------------------------------------------------------------------
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
-                            oot_year=None, remove_late_rounds=True):
+                            oot_year=None, remove_late_rounds=True,
+                            scoring="average_precision"):
     """Train all batch models with cross-validation and Optuna hyperparameter tuning.
 
     For each model:
@@ -443,6 +473,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     2. Optuna TPE Bayesian search (30 trials, median pruner) → tuned_cv_auc
     3. Evaluate tuned model on held-out test → auc_test
     4. Evaluate on OOT → auc_oot
+
+    Args:
+        scoring: "average_precision" (optimize PR-AUC) or "roc_auc" (optimize ROC-AUC).
 
     Returns:
         (comparison DataFrame, best model name)
@@ -472,6 +505,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     for name, pipeline in candidates.items():
         if name in ("XGBoost", "LightGBM"):
             pipeline.set_params(model__scale_pos_weight=scale_pos_weight)
+        # AdaBoost handles imbalance via sample_weight in SAMME, no extra param needed
         print(f"\n  [BATCH] Training {name}...")
         t_start = time.time()
         try:
@@ -484,18 +518,22 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 mlflow.log_param("n_test_rows", len(X_test))
                 mlflow.log_param("n_oot_rows", len(X_oot))
                 mlflow.log_param("oot_year", oot_year)
+                mlflow.log_param("scoring", scoring)
+
+                score_label = "AUC" if scoring == "roc_auc" else "AP"
 
                 # --- Step 1: CV with default params ---
                 n_folds_actual = ExpandingWindowCV(years_train).n_splits
                 print(f"    CV ({n_folds_actual}-fold expanding window) default params...")
                 cv_mean, cv_std, cv_scores = cross_validate_model(
                     pipeline, X_train, y_train, years=years_train,
+                    scoring=scoring,
                 )
-                mlflow.log_metric("cv_ap_mean", cv_mean)
-                mlflow.log_metric("cv_ap_std", cv_std)
+                mlflow.log_metric("cv_score_mean", cv_mean)
+                mlflow.log_metric("cv_score_std", cv_std)
                 for i, score in enumerate(cv_scores):
                     mlflow.log_metric(f"cv_fold_{i}", score)
-                print(f"    Default CV AP: {cv_mean:.4f} (+/- {cv_std:.4f})")
+                print(f"    Default CV {score_label}: {cv_mean:.4f} (+/- {cv_std:.4f})")
 
                 # --- Step 2: Optuna tuning ---
                 print(f"    Optuna tuning ({N_OPTUNA_TRIALS} trials, TPE + median pruner)...")
@@ -503,11 +541,12 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     pipeline, X_train, y_train, name,
                     years=years_train,
                     n_trials=N_OPTUNA_TRIALS,
+                    scoring=scoring,
                 )
 
                 if tuned_cv_auc > cv_mean:
                     pipeline = tuned_pipeline
-                    print(f"    Tuned CV AP: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
+                    print(f"    Tuned CV {score_label}: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
                 else:
                     tuned_cv_auc = cv_mean
                     # Disable early stopping for full fit (no eval_set)
@@ -515,9 +554,9 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                         pipeline.set_params(model__early_stopping_rounds=None)
                     pipeline.fit(X_train, y_train)
                     best_params = {}
-                    print(f"    Tuned CV AP: {tuned_cv_auc:.4f} (kept defaults)")
+                    print(f"    Tuned CV {score_label}: {tuned_cv_auc:.4f} (kept defaults)")
 
-                mlflow.log_metric("tuned_cv_ap", tuned_cv_auc)
+                mlflow.log_metric("tuned_cv_score", tuned_cv_auc)
                 for param_key, param_val in best_params.items():
                     mlflow.log_param(f"best_{param_key}", param_val)
 
@@ -556,8 +595,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 results.append({
                     "model": name,
                     "mode": "batch",
-                    "cv_ap": cv_mean,
-                    "tuned_cv_ap": tuned_cv_auc,
+                    "cv_score": cv_mean,
+                    "tuned_cv_score": tuned_cv_auc,
                     "auc_train": auc_train,
                     "auc_test": auc_test,
                     "auc_oot": auc_oot,
@@ -575,15 +614,18 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     comparison = pd.DataFrame(results)
 
-    # Select best by OOT PR-AUC, fallback to tuned CV AP
-    score_col = "pr_auc_oot" if comparison["pr_auc_oot"].notna().any() else "tuned_cv_ap"
+    # Select best by OOT metric matching the scoring strategy
+    if scoring == "roc_auc":
+        score_col = "auc_oot" if comparison["auc_oot"].notna().any() else "tuned_cv_score"
+    else:
+        score_col = "pr_auc_oot" if comparison["pr_auc_oot"].notna().any() else "tuned_cv_score"
     best_idx = comparison[score_col].fillna(0).idxmax()
     best_model_name = comparison.loc[best_idx, "model"]
     best_run_id = comparison.loc[best_idx, "run_id"]
 
     mlflow.MlflowClient().set_tag(best_run_id, "best_model", "true")
 
-    auc_cols = ["model", "mode", "cv_ap", "tuned_cv_ap", "auc_train", "auc_test", "auc_oot"]
+    auc_cols = ["model", "mode", "cv_score", "tuned_cv_score", "auc_train", "auc_test", "auc_oot"]
     extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
     print(f"\n  Batch model comparison (ROC-AUC):")
     print(comparison[auc_cols].to_string(index=False))
@@ -599,7 +641,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     final_pipeline, _, _ = optuna_tune(
         best_base_pipeline, all_X, all_y, best_model_name,
-        years=all_years, n_trials=N_OPTUNA_TRIALS,
+        years=all_years, n_trials=N_OPTUNA_TRIALS, scoring=scoring,
     )
 
     with mlflow.start_run(run_name=f"batch_{best_model_name}_final"):
