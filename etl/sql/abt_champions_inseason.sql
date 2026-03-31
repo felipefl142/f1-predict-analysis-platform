@@ -1,10 +1,9 @@
 -- In-season ABT: one row per (driver, race event) per season.
 -- Features are point-in-time from the silver feature store at each race date,
 -- so no future data is ever included for a given row.
--- Added season context: race number, total races, and season fraction so the
--- model can calibrate its confidence based on how far through the season we are.
 -- Label: fl_champion = 1 only from the race where the championship is
--- mathematically clinched (leader's gap > max remaining points) onwards.
+-- mathematically clinched onwards.  Uses champions CSV as source of truth
+-- so incomplete seasons (no CSV entry) never produce false champions.
 
 WITH race_calendar AS (
     SELECT
@@ -73,7 +72,7 @@ standings AS (
     GROUP BY year, dt_ref
 ),
 
--- Driver standings at each event: position, gap to leader
+-- Driver standings at each event: position, gap to leader, momentum
 driver_standings AS (
     SELECT
         year,
@@ -86,16 +85,41 @@ driver_standings AS (
     FROM cumulative_points
 ),
 
--- First event where championship is clinched
+-- Momentum: change in standings over the last 3 race events
+driver_momentum AS (
+    SELECT
+        year,
+        dt_ref,
+        driverid,
+        cum_points,
+        standing_position,
+        points_gap_to_leader,
+        points_pct_of_leader,
+        -- Positive = improving (moving up in standings)
+        LAG(standing_position, 3) OVER w - standing_position AS standings_momentum_3r,
+        LAG(standing_position, 1) OVER w - standing_position AS standings_momentum_1r,
+        -- Positive = closing the gap (or extending lead)
+        LAG(points_gap_to_leader, 3) OVER w - points_gap_to_leader AS gap_momentum_3r,
+        -- Points scored in last 3 events vs prior 3 events
+        cum_points - LAG(cum_points, 3) OVER w AS points_last3,
+        LAG(cum_points, 3) OVER w - LAG(cum_points, 6) OVER w AS points_prev3,
+    FROM driver_standings
+    WINDOW w AS (PARTITION BY year, driverid ORDER BY dt_ref)
+),
+
+-- First event where the CSV champion mathematically clinches
 clinch_event AS (
     SELECT
-        s.year,
-        s.leader_driverid AS champion_driverid,
+        ch.year,
+        ch.driverid AS champion_driverid,
         MIN(s.dt_ref) AS clinch_date
-    FROM standings s
-    JOIN remaining_points rp ON s.year = rp.year AND s.dt_ref = rp.dt_ref
+    FROM read_csv_auto('{champions_csv}') ch
+    JOIN standings s
+        ON ch.year = s.year AND s.leader_driverid = ch.driverid
+    JOIN remaining_points rp
+        ON s.year = rp.year AND s.dt_ref = rp.dt_ref
     WHERE s.leader_gap > rp.max_remaining_pts
-    GROUP BY s.year, s.leader_driverid
+    GROUP BY ch.year, ch.driverid
 )
 
 SELECT
@@ -103,9 +127,36 @@ SELECT
     rc.season_race_number,
     rc.season_total_races,
     ROUND(rc.season_race_number * 1.0 / rc.season_total_races, 3) AS season_fraction,
-    COALESCE(ds.standing_position, 99) AS standing_position,
-    COALESCE(ds.points_gap_to_leader, 0) AS points_gap_to_leader,
-    COALESCE(ds.points_pct_of_leader, 0) AS points_pct_of_leader,
+    COALESCE(dm.standing_position, 99) AS standing_position,
+    COALESCE(dm.points_gap_to_leader, 0) AS points_gap_to_leader,
+    COALESCE(dm.points_pct_of_leader, 0) AS points_pct_of_leader,
+    -- Momentum features
+    COALESCE(dm.standings_momentum_3r, 0) AS standings_momentum_3r,
+    COALESCE(dm.standings_momentum_1r, 0) AS standings_momentum_1r,
+    COALESCE(dm.gap_momentum_3r, 0) AS gap_momentum_3r,
+    COALESCE(dm.points_last3, 0) AS points_last3,
+    COALESCE(dm.points_prev3, 0) AS points_prev3,
+    COALESCE(dm.points_last3 - dm.points_prev3, 0) AS points_accel,
+    -- Clinch proximity: how close is this driver to clinching (or being eliminated)?
+    -- For leader (P1):  leader_gap / remaining  (>1.0 = clinched)
+    -- For others:       -gap_to_leader / remaining  (negative = behind)
+    COALESCE(
+        CASE
+            WHEN rp.max_remaining_pts > 0 THEN
+                CASE
+                    WHEN dm.standing_position = 1 THEN st.leader_gap * 1.0 / rp.max_remaining_pts
+                    ELSE -1.0 * dm.points_gap_to_leader / rp.max_remaining_pts
+                END
+            WHEN dm.standing_position = 1 THEN 1.0
+            ELSE -1.0
+        END,
+        0
+    ) AS clinch_proximity,
+    -- Interaction features
+    COALESCE(dm.points_pct_of_leader * f.qtd_wins_last10, 0) AS pct_leader_x_wins,
+    COALESCE(dm.points_pct_of_leader * f.qtd_podiums_last10, 0) AS pct_leader_x_podiums,
+    COALESCE(dm.points_pct_of_leader * f.total_points_last10, 0) AS pct_leader_x_points,
+    -- Target
     CASE
         WHEN f.driverid = cl.champion_driverid AND f.dt_ref >= cl.clinch_date THEN 1
         ELSE 0
@@ -113,8 +164,12 @@ SELECT
 FROM read_parquet('{silver_dir}/fs_driver_all.parquet') f
 INNER JOIN race_calendar rc
     ON f.dt_ref = rc.dt_ref
-LEFT JOIN driver_standings ds
-    ON ds.driverid = f.driverid AND ds.dt_ref = f.dt_ref
+LEFT JOIN driver_momentum dm
+    ON dm.driverid = f.driverid AND dm.dt_ref = f.dt_ref
+LEFT JOIN standings st
+    ON EXTRACT(YEAR FROM f.dt_ref)::INT = st.year AND f.dt_ref = st.dt_ref
+LEFT JOIN remaining_points rp
+    ON EXTRACT(YEAR FROM f.dt_ref)::INT = rp.year AND f.dt_ref = rp.dt_ref
 LEFT JOIN clinch_event cl
     ON EXTRACT(YEAR FROM f.dt_ref)::INT = cl.year
 WHERE f.dt_ref >= DATE '2000-01-01'

@@ -28,7 +28,7 @@ def train_team_models(skip_logreg=False):
     print(f"ABT loaded: {df.shape[0]} rows, {df.shape[1]} columns")
     print(f"Constructor champion rate: {df['fl_constructor_champion'].mean():.4f}")
 
-    batch_candidates = get_batch_models(skip_logreg=skip_logreg)
+    batch_candidates = get_batch_models(skip_logreg=skip_logreg, oversampling=True)
     comparison, best = train_and_compare_batch(
         df=df,
         target_col="fl_constructor_champion",

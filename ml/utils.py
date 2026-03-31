@@ -74,19 +74,25 @@ def _find_oot_year(df, target_col):
 def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
     """Split into train/test/OOT sets using a temporal strategy.
 
-    OOT = most recent year with both classes.
-    Test = second most recent year with both classes (before OOT).
+    oot_year can be a single int or a list of ints (multi-year OOT).
+    OOT = most recent year(s) with both classes (or explicit).
+    Test = most recent year before OOT with both classes.
     Train = all remaining years before test.
     """
     df = df.copy()
     df["year"] = pd.to_datetime(df["dt_ref"]).dt.year
 
+    # Normalize oot_year to a sorted list
     if oot_year is None:
-        oot_year = _find_oot_year(df, target_col)
-    print(f"  OOT year: {oot_year}")
+        oot_years = [_find_oot_year(df, target_col)]
+    elif isinstance(oot_year, (list, tuple)):
+        oot_years = sorted(oot_year)
+    else:
+        oot_years = [oot_year]
+    print(f"  OOT year(s): {oot_years}")
 
-    df_oot = df[df["year"] == oot_year].copy()
-    df_rest = df[df["year"] < oot_year].copy()
+    df_oot = df[df["year"].isin(oot_years)].copy()
+    df_rest = df[df["year"] < min(oot_years)].copy()
 
     # Test = most recent year before OOT with both classes
     test_year = _find_oot_year(df_rest, target_col)
@@ -111,7 +117,33 @@ def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
             df_train = df_train.merge(df_year_round, how="inner")
 
     print(f"  Split: train={len(df_train)}, test={len(df_test)}, oot={len(df_oot)}")
-    return df_train, df_test, df_oot, oot_year
+    return df_train, df_test, df_oot, oot_years
+
+
+def _top1_champion_accuracy(df_subset, y_prob, champions_csv="data/champions.csv"):
+    """At each race event, check if the top-predicted driver is the actual champion.
+
+    Returns fraction of events where the model's #1 pick is correct.
+    Ignores years not in the champions CSV (e.g. incomplete seasons).
+    """
+    champs = pd.read_csv(champions_csv)
+    champ_map = dict(zip(champs["year"], champs["driverid"]))
+
+    tmp = df_subset[["driverid", "dt_ref"]].copy()
+    tmp["year"] = pd.to_datetime(tmp["dt_ref"]).dt.year
+    tmp["prob"] = y_prob
+
+    correct = 0
+    total = 0
+    for (year, dt_ref), grp in tmp.groupby(["year", "dt_ref"]):
+        if year not in champ_map:
+            continue
+        top_driver = grp.loc[grp["prob"].idxmax(), "driverid"]
+        if top_driver == champ_map[year]:
+            correct += 1
+        total += 1
+
+    return correct / total if total > 0 else 0.0
 
 
 def _log_classification_metrics(y_true, y_prob, suffix):
@@ -314,28 +346,29 @@ def _suggest_params(trial, model_name):
         }
     elif model_name == "LightGBM":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 5),
+            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
+            "model__num_leaves": trial.suggest_int("num_leaves", 4, 20),
+            "model__max_depth": trial.suggest_int("max_depth", 2, 5),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
+            "model__subsample": trial.suggest_float("subsample", 0.5, 0.9),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_samples": trial.suggest_int("min_child_samples", 50, 200),
-            "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-            "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-            "model__early_stopping_rounds": 50,
+            "model__min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
+            "model__reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
+            "model__reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+            "model__early_stopping_rounds": 30,
         }
     elif model_name == "XGBoost":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 5),
+            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
+            "model__max_depth": trial.suggest_int("max_depth", 2, 6),
             "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "model__subsample": trial.suggest_float("subsample", 0.5, 0.8),
+            "model__subsample": trial.suggest_float("subsample", 0.5, 0.9),
             "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_weight": trial.suggest_int("min_child_weight", 30, 150),
-            "model__reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-            "model__reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-            "model__gamma": trial.suggest_float("gamma", 1e-4, 5.0, log=True),
-            "model__early_stopping_rounds": 50,
+            "model__min_child_weight": trial.suggest_int("min_child_weight", 5, 100),
+            "model__reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
+            "model__reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+            "model__gamma": trial.suggest_float("gamma", 0.01, 5.0, log=True),
+            "model__early_stopping_rounds": 30,
         }
     elif model_name == "AdaBoost":
         return {
@@ -363,6 +396,7 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
     _SCORE_FN = {
         "average_precision": metrics.average_precision_score,
         "roc_auc": metrics.roc_auc_score,
+        "f1": lambda y_true, y_prob: metrics.f1_score(y_true, (y_prob >= 0.5).astype(int)),
     }
     score_fn = _SCORE_FN[scoring]
 
@@ -391,7 +425,12 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
                 fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
-            cloned.fit(X_fold_train, y_fold_train, **fit_params)
+            try:
+                cloned.fit(X_fold_train, y_fold_train, **fit_params)
+            except Exception:
+                # LightGBM can crash with certain param combos on small datasets
+                # (e.g. left_count assertion failure). Return worst score for trial.
+                return 0.0
             y_pred = cloned.predict_proba(X_fold_val)[:, 1]
             if y_fold_val.nunique() < 2:
                 # Validation fold has only one class; treat as baseline
@@ -465,7 +504,7 @@ def _suggest_params_from_dict(params_dict, model_name):
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
                             oot_year=None, remove_late_rounds=True,
-                            scoring="average_precision"):
+                            scoring="average_precision", feature_cols=None):
     """Train all batch models with cross-validation and Optuna hyperparameter tuning.
 
     For each model:
@@ -476,13 +515,14 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     Args:
         scoring: "average_precision" (optimize PR-AUC) or "roc_auc" (optimize ROC-AUC).
+        feature_cols: explicit list of feature columns. If None, auto-detect.
 
     Returns:
         (comparison DataFrame, best model name)
     """
     setup_mlflow(experiment_name)
-    features = get_feature_columns(df, exclude_cols=id_cols)
-    df_train, df_test, df_oot, oot_year = split_data(
+    features = feature_cols if feature_cols is not None else get_feature_columns(df, exclude_cols=id_cols)
+    df_train, df_test, df_oot, oot_years = split_data(
         df, target_col, id_cols, oot_year,
         remove_late_rounds=remove_late_rounds,
     )
@@ -503,7 +543,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     print(f"  Class balance: {n_neg} neg / {n_pos} pos → scale_pos_weight={scale_pos_weight:.2f}")
 
     for name, pipeline in candidates.items():
-        if name in ("XGBoost", "LightGBM"):
+        has_sampler = "sampler" in pipeline.named_steps
+        if name in ("XGBoost", "LightGBM") and not has_sampler:
             pipeline.set_params(model__scale_pos_weight=scale_pos_weight)
         # AdaBoost handles imbalance via sample_weight in SAMME, no extra param needed
         print(f"\n  [BATCH] Training {name}...")
@@ -517,7 +558,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 mlflow.log_param("n_train_rows", len(X_train))
                 mlflow.log_param("n_test_rows", len(X_test))
                 mlflow.log_param("n_oot_rows", len(X_oot))
-                mlflow.log_param("oot_year", oot_year)
+                mlflow.log_param("oot_year", str(oot_years))
                 mlflow.log_param("scoring", scoring)
 
                 score_label = "AUC" if scoring == "roc_auc" else "AP"
@@ -572,6 +613,15 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     y_oot_prob,
                 )
 
+                # Top-1 champion accuracy (per-event)
+                top1_test = _top1_champion_accuracy(df_test, y_test_prob)
+                mlflow.log_metric("top1_acc_test", round(top1_test, 4))
+                extra_metrics["top1_acc_test"] = top1_test
+                if y_oot_prob is not None:
+                    top1_oot = _top1_champion_accuracy(df_oot, y_oot_prob)
+                    mlflow.log_metric("top1_acc_oot", round(top1_oot, 4))
+                    extra_metrics["top1_acc_oot"] = top1_oot
+
                 # Log feature importances if available
                 model_step = pipeline.named_steps.get("model")
                 if hasattr(model_step, "feature_importances_"):
@@ -606,6 +656,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     "log_loss_oot": extra_metrics.get("log_loss_oot"),
                     "brier_test": extra_metrics.get("brier_test"),
                     "brier_oot": extra_metrics.get("brier_oot"),
+                    "top1_acc_test": extra_metrics.get("top1_acc_test"),
+                    "top1_acc_oot": extra_metrics.get("top1_acc_oot"),
                     "run_id": mlflow.active_run().info.run_id,
                 })
         except Exception as e:
@@ -617,6 +669,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     # Select best by OOT metric matching the scoring strategy
     if scoring == "roc_auc":
         score_col = "auc_oot" if comparison["auc_oot"].notna().any() else "tuned_cv_score"
+    elif scoring == "f1":
+        score_col = "f1_oot" if "f1_oot" in comparison.columns and comparison["f1_oot"].notna().any() else "tuned_cv_score"
     else:
         score_col = "pr_auc_oot" if comparison["pr_auc_oot"].notna().any() else "tuned_cv_score"
     best_idx = comparison[score_col].fillna(0).idxmax()
@@ -627,10 +681,14 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     auc_cols = ["model", "mode", "cv_score", "tuned_cv_score", "auc_train", "auc_test", "auc_oot"]
     extra_cols = ["model", "pr_auc_test", "pr_auc_oot", "log_loss_test", "log_loss_oot", "brier_test", "brier_oot"]
+    top1_cols = ["model", "top1_acc_test", "top1_acc_oot"]
     print(f"\n  Batch model comparison (ROC-AUC):")
     print(comparison[auc_cols].to_string(index=False))
     print(f"\n  Batch model comparison (PR-AUC / calibration):")
     print(comparison[[c for c in extra_cols if c in comparison.columns]].to_string(index=False))
+    if "top1_acc_test" in comparison.columns:
+        print(f"\n  Batch model comparison (Top-1 champion accuracy per event):")
+        print(comparison[[c for c in top1_cols if c in comparison.columns]].to_string(index=False))
     print(f"\n  Best batch model: {best_model_name} (by {score_col})")
 
     # Retrain best model on ALL data with Optuna tuning

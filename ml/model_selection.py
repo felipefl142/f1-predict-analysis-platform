@@ -7,6 +7,7 @@ from feature_engine.imputation import ArbitraryNumberImputer
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from imblearn.ensemble import BalancedRandomForestClassifier
+from imblearn.over_sampling import BorderlineSMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 
 
@@ -14,12 +15,14 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 # Batch models
 # ---------------------------------------------------------------------------
 
-def get_batch_models(skip_logreg=False):
+def get_batch_models(skip_logreg=False, oversampling=False):
     """Return dict of {name: sklearn Pipeline} for batch candidate models.
 
-    Candidates: LogisticRegression, LightGBM, BalancedRandomForest, XGBoost, CatBoost.
-    LogisticRegression always uses class_weight='balanced'; boosting models
-    do not — they handle imbalance through their own adaptive reweighting.
+    Args:
+        skip_logreg: Skip LogisticRegression candidate.
+        oversampling: Use ADASYN oversampling for boosting models instead of
+            scale_pos_weight. Recommended for highly imbalanced targets
+            (champion, team) where the minority class is too small.
     """
     candidates = {}
 
@@ -36,19 +39,57 @@ def get_batch_models(skip_logreg=False):
             )),
         ])
 
-    candidates["LightGBM"] = Pipeline([
-        ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
-        ("model", LGBMClassifier(
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.05,
-            min_child_samples=20,
-            random_state=42,
-            n_jobs=-1,
-            device="gpu",
-            verbosity=-1,
-        )),
-    ])
+    lgbm = LGBMClassifier(
+        n_estimators=200,
+        num_leaves=10,
+        max_depth=3,
+        learning_rate=0.01,
+        min_child_samples=200,
+        reg_alpha=5.0,
+        reg_lambda=5.0,
+        random_state=42,
+        n_jobs=-1,
+        device="gpu",
+        verbosity=-1,
+    )
+    xgb = XGBClassifier(
+        n_estimators=200,
+        max_depth=3,
+        learning_rate=0.01,
+        min_child_weight=200,
+        reg_alpha=5.0,
+        reg_lambda=5.0,
+        gamma=1.0,
+        random_state=42,
+        n_jobs=-1,
+        eval_metric="logloss",
+        verbosity=0,
+        device="cuda",
+        tree_method="hist",
+    )
+
+    if oversampling:
+        sampler = BorderlineSMOTE(random_state=42, k_neighbors=3)
+        candidates["LightGBM"] = ImbPipeline([
+            ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
+            ("sampler", sampler),
+            ("model", lgbm),
+        ])
+        candidates["XGBoost"] = ImbPipeline([
+            ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
+            ("sampler", BorderlineSMOTE(random_state=42, k_neighbors=3)),
+            ("model", xgb),
+        ])
+    else:
+        candidates["LightGBM"] = Pipeline([
+            ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
+            ("model", lgbm),
+        ])
+        candidates["XGBoost"] = Pipeline([
+            ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
+            ("model", xgb),
+        ])
+
     candidates["BalancedRandomForest"] = ImbPipeline([
         ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
         ("model", BalancedRandomForestClassifier(
@@ -58,21 +99,6 @@ def get_batch_models(skip_logreg=False):
             max_samples=0.7,
             random_state=42,
             n_jobs=-1,
-        )),
-    ])
-    candidates["XGBoost"] = Pipeline([
-        ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
-        ("model", XGBClassifier(
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.05,
-            min_child_weight=10,
-            random_state=42,
-            n_jobs=-1,
-            eval_metric="logloss",
-            verbosity=0,
-            device="cuda",
-            tree_method="hist",
         )),
     ])
     return candidates
