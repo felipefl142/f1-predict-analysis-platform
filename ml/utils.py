@@ -120,16 +120,26 @@ def split_data(df, target_col, id_cols, oot_year=None, remove_late_rounds=True):
     return df_train, df_test, df_oot, oot_years
 
 
-def _top1_champion_accuracy(df_subset, y_prob, champions_csv="data/champions.csv"):
-    """At each race event, check if the top-predicted driver is the actual champion.
+def _top1_champion_accuracy(df_subset, y_prob, id_col="driverid",
+                            champions_csv=None):
+    """At each race event, check if the top-predicted entity is the actual champion.
+
+    Works for both driver-level (id_col="driverid") and team-level
+    (id_col="teamid") ABTs by using the appropriate champions CSV.
 
     Returns fraction of events where the model's #1 pick is correct.
     Ignores years not in the champions CSV (e.g. incomplete seasons).
     """
-    champs = pd.read_csv(champions_csv)
-    champ_map = dict(zip(champs["year"], champs["driverid"]))
+    if champions_csv is None:
+        if id_col == "teamid":
+            champions_csv = "data/constructors_champions.csv"
+        else:
+            champions_csv = "data/champions.csv"
 
-    tmp = df_subset[["driverid", "dt_ref"]].copy()
+    champs = pd.read_csv(champions_csv)
+    champ_map = dict(zip(champs["year"], champs[id_col]))
+
+    tmp = df_subset[[id_col, "dt_ref"]].copy()
     tmp["year"] = pd.to_datetime(tmp["dt_ref"]).dt.year
     tmp["prob"] = y_prob
 
@@ -138,8 +148,8 @@ def _top1_champion_accuracy(df_subset, y_prob, champions_csv="data/champions.csv
     for (year, dt_ref), grp in tmp.groupby(["year", "dt_ref"]):
         if year not in champ_map:
             continue
-        top_driver = grp.loc[grp["prob"].idxmax(), "driverid"]
-        if top_driver == champ_map[year]:
+        top_entity = grp.loc[grp["prob"].idxmax(), id_col]
+        if top_entity == champ_map[year]:
             correct += 1
         total += 1
 
@@ -337,12 +347,15 @@ def _suggest_params(trial, model_name):
         }
     elif model_name == "BalancedRandomForest":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 100, 500, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 3, 6),
-            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 30, 150),
+            "model__n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
+            "model__max_depth": trial.suggest_int("max_depth", 5, 20),
+            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 30),
+            "model__min_samples_split": trial.suggest_int("min_samples_split", 4, 40),
             "model__max_features": trial.suggest_categorical(
                 "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7],
             ),
+            "model__max_samples": trial.suggest_float("max_samples", 0.5, 1.0),
+            "model__replacement": trial.suggest_categorical("replacement", [True, False]),
         }
     elif model_name == "LightGBM":
         return {
@@ -514,13 +527,17 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     4. Evaluate on OOT → auc_oot
 
     Args:
-        scoring: "average_precision" (optimize PR-AUC) or "roc_auc" (optimize ROC-AUC).
+        scoring: "average_precision" (optimize PR-AUC), "roc_auc" (optimize ROC-AUC),
+            or "combined" (tune with average_precision, select best by combined
+            pr_auc_oot + top1_acc_test rank).
         feature_cols: explicit list of feature columns. If None, auto-detect.
 
     Returns:
         (comparison DataFrame, best model name)
     """
     setup_mlflow(experiment_name)
+    # "combined" uses average_precision for CV/tuning, combined rank for final selection
+    cv_scoring = "average_precision" if scoring == "combined" else scoring
     features = feature_cols if feature_cols is not None else get_feature_columns(df, exclude_cols=id_cols)
     df_train, df_test, df_oot, oot_years = split_data(
         df, target_col, id_cols, oot_year,
@@ -561,14 +578,14 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 mlflow.log_param("oot_year", str(oot_years))
                 mlflow.log_param("scoring", scoring)
 
-                score_label = "AUC" if scoring == "roc_auc" else "AP"
+                score_label = "AUC" if cv_scoring == "roc_auc" else "AP"
 
                 # --- Step 1: CV with default params ---
                 n_folds_actual = ExpandingWindowCV(years_train).n_splits
                 print(f"    CV ({n_folds_actual}-fold expanding window) default params...")
                 cv_mean, cv_std, cv_scores = cross_validate_model(
                     pipeline, X_train, y_train, years=years_train,
-                    scoring=scoring,
+                    scoring=cv_scoring,
                 )
                 mlflow.log_metric("cv_score_mean", cv_mean)
                 mlflow.log_metric("cv_score_std", cv_std)
@@ -582,7 +599,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     pipeline, X_train, y_train, name,
                     years=years_train,
                     n_trials=N_OPTUNA_TRIALS,
-                    scoring=scoring,
+                    scoring=cv_scoring,
                 )
 
                 if tuned_cv_auc > cv_mean:
@@ -614,13 +631,22 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 )
 
                 # Top-1 champion accuracy (per-event)
-                top1_test = _top1_champion_accuracy(df_test, y_test_prob)
-                mlflow.log_metric("top1_acc_test", round(top1_test, 4))
-                extra_metrics["top1_acc_test"] = top1_test
-                if y_oot_prob is not None:
-                    top1_oot = _top1_champion_accuracy(df_oot, y_oot_prob)
-                    mlflow.log_metric("top1_acc_oot", round(top1_oot, 4))
-                    extra_metrics["top1_acc_oot"] = top1_oot
+                # Determine entity column: driverid for driver models, teamid for team models
+                if "driverid" in df_test.columns:
+                    _top1_id_col = "driverid"
+                elif "teamid" in df_test.columns:
+                    _top1_id_col = "teamid"
+                else:
+                    _top1_id_col = None
+
+                if _top1_id_col is not None:
+                    top1_test = _top1_champion_accuracy(df_test, y_test_prob, id_col=_top1_id_col)
+                    mlflow.log_metric("top1_acc_test", round(top1_test, 4))
+                    extra_metrics["top1_acc_test"] = top1_test
+                    if y_oot_prob is not None:
+                        top1_oot = _top1_champion_accuracy(df_oot, y_oot_prob, id_col=_top1_id_col)
+                        mlflow.log_metric("top1_acc_oot", round(top1_oot, 4))
+                        extra_metrics["top1_acc_oot"] = top1_oot
 
                 # Log feature importances if available
                 model_step = pipeline.named_steps.get("model")
@@ -667,13 +693,23 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
     comparison = pd.DataFrame(results)
 
     # Select best by OOT metric matching the scoring strategy
-    if scoring == "roc_auc":
+    if scoring == "combined":
+        # Combined: average rank of pr_auc_oot and top1_acc_test (lower rank = better)
+        pr_rank = comparison["pr_auc_oot"].fillna(0).rank(ascending=False)
+        top1_rank = comparison["top1_acc_test"].fillna(0).rank(ascending=False)
+        comparison["_combined_rank"] = (pr_rank + top1_rank) / 2
+        best_idx = comparison["_combined_rank"].idxmin()
+        comparison.drop(columns=["_combined_rank"], inplace=True)
+        score_col = "combined(pr_auc_oot + top1_acc_test)"
+    elif scoring == "roc_auc":
         score_col = "auc_oot" if comparison["auc_oot"].notna().any() else "tuned_cv_score"
+        best_idx = comparison[score_col].fillna(0).idxmax()
     elif scoring == "f1":
         score_col = "f1_oot" if "f1_oot" in comparison.columns and comparison["f1_oot"].notna().any() else "tuned_cv_score"
+        best_idx = comparison[score_col].fillna(0).idxmax()
     else:
         score_col = "pr_auc_oot" if comparison["pr_auc_oot"].notna().any() else "tuned_cv_score"
-    best_idx = comparison[score_col].fillna(0).idxmax()
+        best_idx = comparison[score_col].fillna(0).idxmax()
     best_model_name = comparison.loc[best_idx, "model"]
     best_run_id = comparison.loc[best_idx, "run_id"]
 
@@ -699,7 +735,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
 
     final_pipeline, _, _ = optuna_tune(
         best_base_pipeline, all_X, all_y, best_model_name,
-        years=all_years, n_trials=N_OPTUNA_TRIALS, scoring=scoring,
+        years=all_years, n_trials=N_OPTUNA_TRIALS, scoring=cv_scoring,
     )
 
     with mlflow.start_run(run_name=f"batch_{best_model_name}_final"):

@@ -15,7 +15,7 @@ The project follows a **medallion architecture**:
 | **Raw** | `data/raw/` | One Parquet file per FastF1 session (`{year}_{round}_{mode}.parquet`), includes weather data (2018+) |
 | **Bronze** | `data/bronze/` | Cleaned and consolidated `results.parquet` with weather columns |
 | **Silver** | `data/silver/` | Feature store with temporal windows (`fs_driver_life.parquet`, `fs_driver_last10.parquet`, `fs_driver_last20.parquet`, `fs_driver_last40.parquet`, `fs_driver_all.parquet`) |
-| **Gold** | `data/gold/` | Analytical base tables: end-of-year (`abt_champions.parquet`, `abt_teams.parquet`, `abt_departures.parquet`) and in-season (`abt_champions_inseason.parquet`, `abt_teams_inseason.parquet`, `abt_departures_inseason.parquet`) |
+| **Gold** | `data/gold/` | Analytical base tables: end-of-year (`abt_champions.parquet`, `abt_teams.parquet`, `abt_departures.parquet`) and in-season (`abt_champions_inseason.parquet`, `abt_teams_inseason.parquet`, `abt_departures_inseason.parquet`). In-season ABTs include clinch detection, momentum features, and clinch proximity |
 
 ## Project Structure
 
@@ -133,7 +133,9 @@ python -m etl.gold
 
 ### Training ML Models
 
-Each prediction task trains and compares multiple batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost) with Optuna hyperparameter tuning. All runs are logged to MLFlow. Use `--nologreg` to skip LogisticRegression:
+Each prediction task trains and compares multiple batch models (LogisticRegression, LightGBM, BalancedRandomForest, XGBoost) with Optuna hyperparameter tuning. All runs are logged to MLFlow. Use `--nologreg` to skip LogisticRegression.
+
+Both champion and team models use curated feature sets that exclude data leakage features (`season_fraction`, `season_race_number`) and zero-importance features. The team model uses a combined scoring metric (PR-AUC + top-1 champion accuracy) to select models that produce meaningful per-event predictions:
 
 ```bash
 # Champion prediction

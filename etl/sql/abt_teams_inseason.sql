@@ -70,6 +70,28 @@ team_standings AS (
     FROM cumulative_team_points
 ),
 
+-- Momentum: change in team standings over recent race events
+team_momentum AS (
+    SELECT
+        year,
+        dt_ref,
+        teamid,
+        cum_points,
+        team_standing_position,
+        team_points_gap_to_leader,
+        team_points_pct_of_leader,
+        -- Positive = improving (moving up in standings)
+        LAG(team_standing_position, 3) OVER w - team_standing_position AS team_standings_momentum_3r,
+        LAG(team_standing_position, 1) OVER w - team_standing_position AS team_standings_momentum_1r,
+        -- Positive = closing the gap (or extending lead)
+        LAG(team_points_gap_to_leader, 3) OVER w - team_points_gap_to_leader AS team_gap_momentum_3r,
+        -- Points scored in last 3 events vs prior 3 events
+        cum_points - LAG(cum_points, 3) OVER w AS team_points_last3,
+        LAG(cum_points, 3) OVER w - LAG(cum_points, 6) OVER w AS team_points_prev3,
+    FROM team_standings
+    WINDOW w AS (PARTITION BY year, teamid ORDER BY dt_ref)
+),
+
 -- At each event_date: gap between leading team and 2nd place team
 team_leader_gap AS (
     SELECT
@@ -173,16 +195,47 @@ team_features AS (
 
 SELECT
     tf.*,
-    ts.team_standing_position,
-    ts.team_points_gap_to_leader,
-    ts.team_points_pct_of_leader,
+    tm.team_standing_position,
+    tm.team_points_gap_to_leader,
+    tm.team_points_pct_of_leader,
+    -- Momentum features
+    COALESCE(tm.team_standings_momentum_3r, 0) AS team_standings_momentum_3r,
+    COALESCE(tm.team_standings_momentum_1r, 0) AS team_standings_momentum_1r,
+    COALESCE(tm.team_gap_momentum_3r, 0) AS team_gap_momentum_3r,
+    COALESCE(tm.team_points_last3, 0) AS team_points_last3,
+    COALESCE(tm.team_points_prev3, 0) AS team_points_prev3,
+    COALESCE(tm.team_points_last3 - tm.team_points_prev3, 0) AS team_points_accel,
+    -- Clinch proximity: how close is this team to clinching (or being eliminated)?
+    -- For leader (P1):  leader_gap / remaining  (>1.0 = clinched)
+    -- For others:       -gap_to_leader / remaining  (negative = behind)
+    COALESCE(
+        CASE
+            WHEN rp.max_remaining_pts > 0 THEN
+                CASE
+                    WHEN tm.team_standing_position = 1 THEN tlg.leader_gap * 1.0 / rp.max_remaining_pts
+                    ELSE -1.0 * tm.team_points_gap_to_leader / rp.max_remaining_pts
+                END
+            WHEN tm.team_standing_position = 1 THEN 1.0
+            ELSE -1.0
+        END,
+        0
+    ) AS team_clinch_proximity,
+    -- Interaction features
+    COALESCE(tm.team_points_pct_of_leader * tf.sum_wins_last10, 0) AS team_pct_leader_x_wins,
+    COALESCE(tm.team_points_pct_of_leader * tf.sum_podiums_last10, 0) AS team_pct_leader_x_podiums,
+    COALESCE(tm.team_points_pct_of_leader * tf.sum_points_last10, 0) AS team_pct_leader_x_points,
+    -- Target
     CASE
         WHEN tf.teamid = cl.champion_teamid AND tf.dt_ref >= cl.clinch_date THEN 1
         ELSE 0
     END AS fl_constructor_champion
 FROM team_features tf
-LEFT JOIN team_standings ts
-    ON tf.teamid = ts.teamid AND tf.dt_ref = ts.dt_ref
+LEFT JOIN team_momentum tm
+    ON tf.teamid = tm.teamid AND tf.dt_ref = tm.dt_ref
+LEFT JOIN team_leader_gap tlg
+    ON tf.year = tlg.year AND tf.dt_ref = tlg.dt_ref
+LEFT JOIN remaining_points rp
+    ON tf.year = rp.year AND tf.dt_ref = rp.dt_ref
 LEFT JOIN clinch_event cl
     ON tf.year = cl.year
 WHERE tf.year >= 2000

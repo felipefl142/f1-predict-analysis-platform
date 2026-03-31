@@ -146,12 +146,19 @@ def _split_data(df, target_col, oot_year=None):
 
     if oot_year is None:
         oot_year = _find_oot(df)
-    df_oot = df[df["year"] == oot_year]
-    df_rest = df[df["year"] < oot_year]
+
+    # Support single int or list of ints
+    if isinstance(oot_year, (list, tuple)):
+        oot_years = sorted(oot_year)
+    else:
+        oot_years = [oot_year]
+
+    df_oot = df[df["year"].isin(oot_years)]
+    df_rest = df[df["year"] < min(oot_years)]
     test_year = _find_oot(df_rest)
     df_test = df_rest[df_rest["year"] == test_year]
     df_train = df_rest[df_rest["year"] < test_year]
-    return df_train, df_test, df_oot, test_year, oot_year
+    return df_train, df_test, df_oot, test_year, oot_years
 
 
 @st.cache_data(ttl=3600)
@@ -427,15 +434,22 @@ def render_model_comparison():
     for run in selected_runs:
         oot_str = run["params"].get("oot_year")
         if oot_str:
-            oot_year_param = int(oot_str)
+            import ast
+            try:
+                parsed = ast.literal_eval(oot_str)
+                oot_year_param = parsed if isinstance(parsed, list) else int(parsed)
+            except (ValueError, SyntaxError):
+                oot_year_param = int(oot_str)
             break
 
     # Evaluate all selected models (cached)
     with st.spinner("Evaluating models on data splits..."):
         evaluations = {}
         for run in selected_runs:
+            # Convert list to tuple for st.cache_data hashability
+            oot_arg = tuple(oot_year_param) if isinstance(oot_year_param, list) else oot_year_param
             evaluations[run["run_id"]] = _evaluate_model(
-                run["run_id"], experiment_name, oot_year_param,
+                run["run_id"], experiment_name, oot_arg,
             )
 
     # Show split info

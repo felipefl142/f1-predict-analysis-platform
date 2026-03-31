@@ -93,10 +93,13 @@ def get_batch_models(skip_logreg=False, oversampling=False):
     candidates["BalancedRandomForest"] = ImbPipeline([
         ("imputer", ArbitraryNumberImputer(arbitrary_number=-10000)),
         ("model", BalancedRandomForestClassifier(
-            n_estimators=300,
-            max_depth=5,
-            min_samples_leaf=50,
-            max_samples=0.7,
+            n_estimators=500,
+            max_depth=10,
+            min_samples_leaf=5,
+            min_samples_split=10,
+            max_features="sqrt",
+            max_samples=0.8,
+            replacement=True,
             random_state=42,
             n_jobs=-1,
         )),

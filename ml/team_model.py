@@ -15,6 +15,50 @@ from ml.utils import train_and_compare_batch
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_teams_inseason.parquet")
 
+# Curated feature set — pruned for the team model
+# Removed: season_fraction/season_race_number/season_total_races (data leakage
+# via season progress), num_drivers/sum_sessions_life/avg_sessions_life/
+# sum_quali_last10 (zero or near-zero importance), all last20 window features
+# (redundant with last10 + life).
+TEAM_FEATURES = [
+    # Core performance (last 10 sessions)
+    "avg_position_last10",
+    "avg_grid_last10",
+    "sum_points_last10",
+    "sum_wins_last10",
+    "sum_podiums_last10",
+    # Lifetime performance
+    "avg_position_life",
+    "avg_podiums_life",
+    "avg_wins_life",
+    "avg_points_life",
+    "sum_podiums_life",
+    "sum_wins_life",
+    "sum_points_life",
+    # Qualifying
+    "sum_quali_top10_life",
+    "sum_quali_top3_life",
+    "avg_quali_position_last10",
+    "avg_quali_position_life",
+    "sum_quali_life",
+    "sum_quali_pole_life",
+    "sum_quali_pole_last10",
+    # Season context (standings only, no season progress)
+    "team_standing_position",
+    "team_points_gap_to_leader",
+    "team_points_pct_of_leader",
+    # Momentum
+    "team_standings_momentum_3r",
+    "team_gap_momentum_3r",
+    "team_points_accel",
+    # Clinch proximity
+    "team_clinch_proximity",
+    # Interactions
+    "team_pct_leader_x_wins",
+    "team_pct_leader_x_podiums",
+    "team_pct_leader_x_points",
+]
+
 
 def train_team_models(skip_logreg=False):
     print("=" * 60)
@@ -37,6 +81,8 @@ def train_team_models(skip_logreg=False):
         candidates=batch_candidates,
         remove_late_rounds=False,
         oot_year=2025,
+        scoring="combined",
+        feature_cols=TEAM_FEATURES,
     )
 
     print(f"\nDone. Best model: {best}")
