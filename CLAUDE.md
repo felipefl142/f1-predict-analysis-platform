@@ -68,6 +68,11 @@ docker-compose up
 - **Web app**: Streamlit with 4 tabs (Predictions, Model Comparison, EDA, DuckDB Console). DuckDB Console supports Ctrl+Enter to run queries. Models loaded inline via `@st.cache_resource`.
 - **Charts**: Plotly for interactive visualizations.
 
+## Development Environment
+
+- **Python venv**: Always use `.venv/bin/python` to run Python commands (e.g. `.venv/bin/python -m ml.champion_model`). The system Python does not have project dependencies installed.
+- **TimesFM venv**: TimesFM uses a separate venv: `.venv-timesfm/bin/python`.
+
 ## Tech Stack
 
 All free: FastF1, DuckDB, pandas, scikit-learn, XGBoost, CatBoost, imbalanced-learn, Optuna, MLFlow, Streamlit, Plotly, Docker.
