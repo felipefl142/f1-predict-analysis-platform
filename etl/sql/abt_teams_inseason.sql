@@ -1,8 +1,7 @@
 -- In-season ABT for constructor champion prediction.
 -- One row per (team, race_event) per season.
 -- Features are team-aggregated driver stats from the silver feature store at each race date.
--- Label: fl_constructor_champion = 1 only from the race where the constructor
--- championship is mathematically clinched (leader's gap > max remaining points) onwards.
+-- Label: fl_constructor_champion = 1 at EVERY race for the eventual constructor champion.
 -- Also includes team standing features (position, gap to leader).
 
 WITH race_calendar AS (
@@ -109,16 +108,10 @@ team_leader_gap AS (
     GROUP BY year, dt_ref
 ),
 
--- First event where constructor championship is mathematically clinched
-clinch_event AS (
-    SELECT
-        s.year,
-        s.leader_teamid AS champion_teamid,
-        MIN(s.dt_ref) AS clinch_date
-    FROM team_leader_gap s
-    JOIN remaining_points rp ON s.year = rp.year AND s.dt_ref = rp.dt_ref
-    WHERE s.leader_gap > rp.max_remaining_pts
-    GROUP BY s.year, s.leader_teamid
+-- Champions lookup (eventual constructor champion per year)
+champions AS (
+    SELECT year, teamid AS champion_teamid
+    FROM read_csv_auto('{constructors_champions_csv}')
 ),
 
 driver_at_race AS (
@@ -205,38 +198,19 @@ SELECT
     COALESCE(tm.team_points_last3, 0) AS team_points_last3,
     COALESCE(tm.team_points_prev3, 0) AS team_points_prev3,
     COALESCE(tm.team_points_last3 - tm.team_points_prev3, 0) AS team_points_accel,
-    -- Clinch proximity: how close is this team to clinching (or being eliminated)?
-    -- For leader (P1):  leader_gap / remaining  (>1.0 = clinched)
-    -- For others:       -gap_to_leader / remaining  (negative = behind)
-    COALESCE(
-        CASE
-            WHEN rp.max_remaining_pts > 0 THEN
-                CASE
-                    WHEN tm.team_standing_position = 1 THEN tlg.leader_gap * 1.0 / rp.max_remaining_pts
-                    ELSE -1.0 * tm.team_points_gap_to_leader / rp.max_remaining_pts
-                END
-            WHEN tm.team_standing_position = 1 THEN 1.0
-            ELSE -1.0
-        END,
-        0
-    ) AS team_clinch_proximity,
     -- Interaction features
     COALESCE(tm.team_points_pct_of_leader * tf.sum_wins_last10, 0) AS team_pct_leader_x_wins,
     COALESCE(tm.team_points_pct_of_leader * tf.sum_podiums_last10, 0) AS team_pct_leader_x_podiums,
     COALESCE(tm.team_points_pct_of_leader * tf.sum_points_last10, 0) AS team_pct_leader_x_points,
-    -- Target
+    -- Target: 1 at every race for the eventual constructor champion
     CASE
-        WHEN tf.teamid = cl.champion_teamid AND tf.dt_ref >= cl.clinch_date THEN 1
+        WHEN tf.teamid = ch.champion_teamid THEN 1
         ELSE 0
     END AS fl_constructor_champion
 FROM team_features tf
 LEFT JOIN team_momentum tm
     ON tf.teamid = tm.teamid AND tf.dt_ref = tm.dt_ref
-LEFT JOIN team_leader_gap tlg
-    ON tf.year = tlg.year AND tf.dt_ref = tlg.dt_ref
-LEFT JOIN remaining_points rp
-    ON tf.year = rp.year AND tf.dt_ref = rp.dt_ref
-LEFT JOIN clinch_event cl
-    ON tf.year = cl.year
+LEFT JOIN champions ch
+    ON tf.year = ch.year
 WHERE tf.year >= 2000
 ORDER BY tf.dt_ref DESC, tf.teamid

@@ -15,6 +15,43 @@ from ml.utils import train_and_compare_batch
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_departures_inseason.parquet")
 
+# Curated feature set — 24 features
+# Removed: all weather features (no causal link to departures), sprint-specific
+# features, redundant last20/last40 windows, season_fraction/season_race_number/
+# season_total_races (leakage via season progress).
+DEPARTURE_FEATURES = [
+    # Recent performance (last 10 sessions)
+    "avg_position_last10",
+    "avg_quali_position_last10",
+    "qtd_top5_last10",
+    "qtd_quali_top10_last10",
+    "total_points_last10",
+    "total_points_race_last10",
+    # Lifetime performance (selective)
+    "total_points_life",
+    "total_points_race_life",
+    "qtd_wins_life",
+    "qtd_top5_life",
+    "qtd_podiums_life",
+    "qtd_grid_top5_life",
+    # Career stage & departure-specific
+    "driver_age",
+    "seasons_since_last_podium",
+    "seasons_since_last_win",
+    "team_tenure_years",
+    "career_distinct_teams",
+    # Teammate comparison
+    "teammate_position_gap",
+    "teammate_grid_gap",
+    "team_points_share",
+    # Season context
+    "season_points_current",
+    "season_dnf_rate",
+    # Performance trends
+    "trend_win_rate",
+    "trend_podium_rate",
+]
+
 
 def train_departure_models(skip_logreg=False):
     print("=" * 60)
@@ -38,6 +75,7 @@ def train_departure_models(skip_logreg=False):
         remove_late_rounds=True,
         oot_year=2025,
         scoring="roc_auc",
+        feature_cols=DEPARTURE_FEATURES,
     )
 
     print(f"\nDone. Best model: {best}")

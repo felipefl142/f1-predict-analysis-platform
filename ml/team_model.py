@@ -15,44 +15,18 @@ from ml.utils import train_and_compare_batch
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_teams_inseason.parquet")
 
-# Curated feature set — pruned for the team model
-# Removed: season_fraction/season_race_number/season_total_races (data leakage
-# via season progress), num_drivers/sum_sessions_life/avg_sessions_life/
-# sum_quali_last10 (zero or near-zero importance), all last20 window features
-# (redundant with last10 + life).
+# Curated feature set — needs re-evaluation after removing tautological features.
+# Previously clinch_proximity dominated all models. Now using performance and
+# momentum features that the model must learn genuine signal from.
 TEAM_FEATURES = [
-    # Core performance (last 10 sessions)
-    "avg_position_last10",
-    "avg_grid_last10",
-    "sum_points_last10",
+    # Team performance (last 10 sessions)
     "sum_wins_last10",
     "sum_podiums_last10",
-    # Lifetime performance
-    "avg_position_life",
-    "avg_podiums_life",
-    "avg_wins_life",
-    "avg_points_life",
-    "sum_podiums_life",
-    "sum_wins_life",
-    "sum_points_life",
-    # Qualifying
-    "sum_quali_top10_life",
-    "sum_quali_top3_life",
-    "avg_quali_position_last10",
-    "avg_quali_position_life",
-    "sum_quali_life",
-    "sum_quali_pole_life",
-    "sum_quali_pole_last10",
-    # Season context (standings only, no season progress)
-    "team_standing_position",
-    "team_points_gap_to_leader",
-    "team_points_pct_of_leader",
+    "sum_points_last10",
+    "avg_position_last10",
+    "avg_grid_last10",
     # Momentum
-    "team_standings_momentum_3r",
-    "team_gap_momentum_3r",
     "team_points_accel",
-    # Clinch proximity
-    "team_clinch_proximity",
     # Interactions
     "team_pct_leader_x_wins",
     "team_pct_leader_x_podiums",
@@ -60,7 +34,7 @@ TEAM_FEATURES = [
 ]
 
 
-def train_team_models(skip_logreg=False):
+def train_team_models(skip_logreg=False, skip_boosting=False):
     print("=" * 60)
     print("F1 Constructor Champion Prediction — Multi-Model Training (in-season ABT)")
     print("=" * 60)
@@ -72,7 +46,7 @@ def train_team_models(skip_logreg=False):
     print(f"ABT loaded: {df.shape[0]} rows, {df.shape[1]} columns")
     print(f"Constructor champion rate: {df['fl_constructor_champion'].mean():.4f}")
 
-    batch_candidates = get_batch_models(skip_logreg=skip_logreg, oversampling=True)
+    batch_candidates = get_batch_models(skip_logreg=skip_logreg, skip_boosting=skip_boosting, oversampling=False)
     comparison, best = train_and_compare_batch(
         df=df,
         target_col="fl_constructor_champion",
@@ -92,5 +66,6 @@ def train_team_models(skip_logreg=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--nologreg", action="store_true", help="Skip LogisticRegression")
+    parser.add_argument("--noboosting", action="store_true", help="Skip LightGBM and XGBoost")
     args = parser.parse_args()
-    train_team_models(skip_logreg=args.nologreg)
+    train_team_models(skip_logreg=args.nologreg, skip_boosting=args.noboosting)

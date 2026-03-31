@@ -171,6 +171,8 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
     df_train, df_test, df_oot, test_year, oot_year = _split_data(abt, target_col, oot_year)
 
     model = _load_model(run_id)
+    if not hasattr(model, "predict_proba"):
+        raise ValueError(f"Model {run_id} does not support predict_proba (e.g. unsupervised model). Skipping.")
     model_features = list(model[0].feature_names_in_) if hasattr(model[0], "feature_names_in_") else features
 
     splits = {}
@@ -445,12 +447,25 @@ def render_model_comparison():
     # Evaluate all selected models (cached)
     with st.spinner("Evaluating models on data splits..."):
         evaluations = {}
+        skipped = []
         for run in selected_runs:
             # Convert list to tuple for st.cache_data hashability
             oot_arg = tuple(oot_year_param) if isinstance(oot_year_param, list) else oot_year_param
-            evaluations[run["run_id"]] = _evaluate_model(
-                run["run_id"], experiment_name, oot_arg,
-            )
+            try:
+                evaluations[run["run_id"]] = _evaluate_model(
+                    run["run_id"], experiment_name, oot_arg,
+                )
+            except (ValueError, AttributeError):
+                skipped.append(run.get("tags.mlflow.runName", run["run_id"]))
+        if skipped:
+            st.warning(f"Skipped models without predict_proba: {', '.join(skipped)}")
+
+    if not evaluations:
+        st.error("No models could be evaluated (all lack predict_proba).")
+        return
+
+    # Filter selected_runs to only those that were successfully evaluated
+    selected_runs = [r for r in selected_runs if r["run_id"] in evaluations]
 
     # Show split info
     _, test_year, oot_year = next(iter(evaluations.values()))
