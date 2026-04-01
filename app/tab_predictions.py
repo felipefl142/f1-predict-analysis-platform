@@ -556,9 +556,18 @@ def _render_departure_predictions():
         .set_index("driverid")["full_name"].to_dict()
     )
     latest = data[data["dt_ref"] == data["dt_ref"].max()]
-    top5 = latest.nlargest(6, "prob_departure")["driverid"].tolist()
+    
+    # Default selection: Top 6 High Risk, Top 4 Medium Risk, 2 Low Risk
+    high_risk = latest[latest["risk_tier"] == "High"].nlargest(6, "prob_departure")["driverid"].tolist()
+    med_risk = latest[latest["risk_tier"] == "Medium"].nlargest(4, "prob_departure")["driverid"].tolist()
+    low_risk = latest[latest["risk_tier"] == "Low"].nlargest(2, "prob_departure")["driverid"].tolist()
+    
+    default_selected = high_risk + med_risk + low_risk
+    if not default_selected:
+        default_selected = latest.nlargest(6, "prob_departure")["driverid"].tolist()
+
     selected = st.multiselect(
-        "Drivers", drivers, default=[d for d in top5 if d in drivers],
+        "Drivers", drivers, default=[d for d in default_selected if d in drivers],
         format_func=lambda x: driver_names.get(x, x),
     )
     if not selected:
