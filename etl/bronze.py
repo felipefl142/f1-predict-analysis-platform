@@ -56,6 +56,7 @@ def build_bronze():
                 TRY_CAST("WindDirection" AS DOUBLE) AS wind_direction,
                 COALESCE(TRY_CAST("Rainfall" AS INTEGER), 0) AS rainfall
             FROM read_parquet('{raw_pattern}', union_by_name=true)
+            WHERE "DriverId" IS NOT NULL AND CAST("DriverId" AS VARCHAR) != 'nan'
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY "DriverId", "Year", "RoundNumber", "Mode"
                 ORDER BY "Date" DESC

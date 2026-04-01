@@ -62,6 +62,9 @@ def train_departure_models(skip_logreg=False):
     df = con.execute(f"SELECT * FROM read_parquet('{ABT_PATH}')").fetchdf()
     con.close()
 
+    # Drop current-year rows with no departure label (used only for prediction)
+    df = df.dropna(subset=["fl_departed"])
+
     print(f"ABT loaded: {df.shape[0]} rows, {df.shape[1]} columns")
     print(f"Departure rate: {df['fl_departed'].mean():.4f}")
 

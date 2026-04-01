@@ -15,9 +15,10 @@ from ml.utils import train_and_compare_batch
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_teams_inseason.parquet")
 
-# Curated feature set — needs re-evaluation after removing tautological features.
-# Previously clinch_proximity dominated all models. Now using performance and
-# momentum features that the model must learn genuine signal from.
+# Curated feature set — clinch_proximity/team_points_gap_to_leader removed
+# (tautological post-clinch). team_standing_position and team_points_pct_of_leader
+# are NOT leakage — they reflect publicly available standings at each race date
+# and naturally grow more informative as the season progresses.
 TEAM_FEATURES = [
     # Team performance (last 10 sessions)
     "sum_wins_last10",
@@ -25,6 +26,9 @@ TEAM_FEATURES = [
     "sum_points_last10",
     "avg_position_last10",
     "avg_grid_last10",
+    # Standings context (point-in-time, available at prediction time)
+    "team_standing_position",
+    "team_points_pct_of_leader",
     # Momentum
     "team_points_accel",
     # Interactions

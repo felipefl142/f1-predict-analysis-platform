@@ -426,9 +426,16 @@ def _render_departure_predictions():
 
     fig = _line_chart(
         plot, "dt_ref", "prob_departure", "label", color_map,
-        title=f"{selected_year} Driver Departure Probability",
+        title=f"{selected_year} Driver Departure Risk",
         y_label="Departure Probability",
     )
+    # Add horizontal risk-tier bands
+    fig.add_hrect(y0=0, y1=0.25, fillcolor="green", opacity=0.07,
+                  annotation_text="Low", annotation_position="top left")
+    fig.add_hrect(y0=0.25, y1=0.60, fillcolor="orange", opacity=0.07,
+                  annotation_text="Medium", annotation_position="top left")
+    fig.add_hrect(y0=0.60, y1=1.0, fillcolor="red", opacity=0.07,
+                  annotation_text="High", annotation_position="top left")
 
     if show_tfm:
         try:
@@ -441,13 +448,18 @@ def _render_departure_predictions():
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("End-of-season standing")
-    latest_sel = latest[latest["driverid"].isin(selected)].sort_values("prob_departure", ascending=False)
+    st.subheader("Latest Risk Assessment")
+    tier_colors = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
+    latest_sel = latest[latest["driverid"].isin(selected)].sort_values("prob_departure", ascending=False).copy()
+    tier_str = latest_sel["risk_tier"].astype(str)
+    prob_str = latest_sel["prob_departure"].apply(lambda p: f"({p:.1%})")
+    latest_sel["Risk"] = tier_str.map(tier_colors) + " " + tier_str + " " + prob_str
     st.dataframe(
-        latest_sel[["full_name", "team_name", "prob_departure"]].style.format(
-            {"prob_departure": "{:.2%}"}
+        latest_sel[["full_name", "team_name", "Risk"]].rename(
+            columns={"full_name": "Driver", "team_name": "Team"}
         ),
         use_container_width=True,
+        hide_index=True,
     )
 
     with st.expander("Model Comparison"):

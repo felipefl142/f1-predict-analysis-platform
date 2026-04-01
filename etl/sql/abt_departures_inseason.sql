@@ -4,7 +4,7 @@
 -- Includes departure-specific features: performance trends, teammate comparison,
 -- team tenure, and DNF rate — computed here to avoid affecting other ABTs.
 -- Label: fl_departed = 1 if driver did not race in the following year.
--- Current year is excluded because departure labels are not yet available.
+-- Current year is included with fl_departed = NULL for in-season predictions.
 
 WITH race_calendar AS (
     SELECT
@@ -24,11 +24,17 @@ driver_years AS (
     FROM read_parquet('{bronze_path}')
 ),
 
+max_year AS (
+    SELECT MAX(year) AS latest_year FROM driver_years
+),
+
 departure_labels AS (
     SELECT
         dy.driverid,
         dy.year,
         CASE
+            -- Cannot compute departure for the latest year (no next-year data)
+            WHEN dy.year = (SELECT latest_year FROM max_year) THEN NULL
             WHEN next_yr.driverid IS NULL THEN 1
             ELSE 0
         END AS fl_departed
@@ -215,7 +221,7 @@ SELECT
     dl.fl_departed
 FROM read_parquet('{silver_dir}/fs_driver_all.parquet') f
 INNER JOIN race_calendar rc ON f.dt_ref = rc.dt_ref
-INNER JOIN departure_labels dl
+LEFT JOIN departure_labels dl
     ON f.driverid = dl.driverid AND rc.year = dl.year
 LEFT JOIN teammate_features tm
     ON f.dt_ref = tm.dt_ref AND f.driverid = tm.driverid
@@ -230,5 +236,4 @@ LEFT JOIN career_teams ct
 LEFT JOIN last_achievement la
     ON f.dt_ref = la.dt_ref AND f.driverid = la.driverid
 WHERE rc.year >= 2000
-  AND rc.year < EXTRACT(YEAR FROM CURRENT_DATE)
 ORDER BY f.dt_ref DESC, f.driverid

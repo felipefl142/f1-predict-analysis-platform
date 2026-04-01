@@ -15,14 +15,16 @@ from ml.utils import train_and_compare_batch
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 ABT_PATH = os.path.join(BASE_DIR, "data", "gold", "abt_champions_inseason.parquet")
 
-# Curated feature set — 15 features
-# Removed: season_fraction/season_race_number (target leakage via season progress),
+# Curated feature set — 17 features
+# Removed: season_fraction/season_race_number/season_total_races (target leakage),
 # total_points_sprint_last10/qtd_seasons_last10 (zero importance),
 # quali features except qtd_pole_win_last10 (negligible importance),
 # standings_momentum_3r (zero importance in all models),
 # qtd_finished_last10 (non-discriminative — nearly all drivers finish in modern F1),
-# standing_position/points_gap_to_leader/points_pct_of_leader/clinch_proximity
-# (tautological with post-clinch target; removed to let model learn real performance signal).
+# clinch_proximity/points_gap_to_leader (tautological post-clinch).
+# standing_position and points_pct_of_leader are NOT leakage — they reflect
+# publicly available standings at each race date and naturally grow more
+# informative as the season progresses, which is desirable for in-season prediction.
 CHAMPION_FEATURES = [
     # Core performance (last 10 sessions)
     "avg_position_last10",
@@ -37,6 +39,9 @@ CHAMPION_FEATURES = [
     "qtd_pole_win_last10",
     # Consistency
     "qtd_sessions_with_points_last10",
+    # Standings context (point-in-time, available at prediction time)
+    "standing_position",
+    "points_pct_of_leader",
     # Momentum
     "gap_momentum_3r",
     "points_accel",

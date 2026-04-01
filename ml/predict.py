@@ -264,8 +264,13 @@ def predict_departures(year: int | None = None, model=None) -> pd.DataFrame:
 
     feat_cols = _model_feature_cols(model)
     abt["prob_departure"] = model.predict_proba(abt[feat_cols])[:, 1]
+    abt["risk_tier"] = pd.cut(
+        abt["prob_departure"],
+        bins=[-1, 0.25, 0.60, 1.01],
+        labels=["Low", "Medium", "High"],
+    )
 
-    result = abt[["dt_ref", "driverid", "prob_departure",
+    result = abt[["dt_ref", "driverid", "prob_departure", "risk_tier",
                   "season_race_number", "season_fraction"]].merge(
         _driver_meta(), on="driverid", how="left"
     )
