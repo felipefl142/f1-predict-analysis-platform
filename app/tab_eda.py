@@ -5,8 +5,10 @@ import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-from app.helpers import get_duckdb_connection, get_team_color, BRONZE_PATH, SILVER_DIR
+from app.helpers import get_duckdb_connection, get_team_color, BRONZE_PATH, SILVER_DIR, GOLD_DIR
 
 
 @st.cache_data(ttl=3600)
@@ -31,6 +33,9 @@ def render_eda():
         "Select visualization",
         [
             "Feature Explorer",
+            "Champion Model Features",
+            "Constructor Model Features",
+            "Departure Model Features",
             "Points Distribution by Season",
             "Win Rate Over Career",
             "Team Comparison",
@@ -42,6 +47,12 @@ def render_eda():
 
     if viz == "Feature Explorer":
         _feature_explorer()
+    elif viz == "Champion Model Features":
+        _champion_features()
+    elif viz == "Constructor Model Features":
+        _constructor_features()
+    elif viz == "Departure Model Features":
+        _departure_features()
     elif viz == "Points Distribution by Season":
         _points_distribution(df)
     elif viz == "Win Rate Over Career":
@@ -190,6 +201,417 @@ def _feature_explorer():
 
     fig.update_layout(hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Champion Model Features (curated 17 features)
+# ---------------------------------------------------------------------------
+
+CHAMPION_FEATURES = [
+    "avg_position_last10", "avg_grid_last10", "avg_overtakes_last10",
+    "total_points_last10", "qtd_wins_last10", "qtd_podiums_last10",
+    "qtd_top5_last10", "qtd_poles_last10", "qtd_pole_win_last10",
+    "qtd_sessions_with_points_last10", "standing_position",
+    "points_pct_of_leader", "gap_momentum_3r", "points_accel",
+    "pct_leader_x_wins", "pct_leader_x_podiums", "pct_leader_x_points",
+]
+
+_CHAMPION_LABELS = {
+    "avg_position_last10": "Avg Finish Pos (L10)",
+    "avg_grid_last10": "Avg Grid Pos (L10)",
+    "avg_overtakes_last10": "Avg Overtakes (L10)",
+    "total_points_last10": "Total Points (L10)",
+    "qtd_wins_last10": "Wins (L10)",
+    "qtd_podiums_last10": "Podiums (L10)",
+    "qtd_top5_last10": "Top 5 Finishes (L10)",
+    "qtd_poles_last10": "Poles (L10)",
+    "qtd_pole_win_last10": "Pole-to-Win (L10)",
+    "qtd_sessions_with_points_last10": "Points Finishes (L10)",
+    "standing_position": "Standings Position",
+    "points_pct_of_leader": "Points % of Leader",
+    "gap_momentum_3r": "Gap Momentum (3-race)",
+    "points_accel": "Points Acceleration",
+    "pct_leader_x_wins": "Leader% x Wins",
+    "pct_leader_x_podiums": "Leader% x Podiums",
+    "pct_leader_x_points": "Leader% x Points",
+}
+
+
+@st.cache_data(ttl=3600)
+def _load_champion_abt():
+    path = os.path.join(GOLD_DIR, "abt_champions_inseason.parquet")
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        SELECT c.*, b.full_name, b.team_name
+        FROM read_parquet('{path}') c
+        LEFT JOIN (
+            SELECT driverid, full_name, team_name,
+                   ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
+            FROM read_parquet('{BRONZE_PATH}')
+        ) b ON c.driverid = b.driverid AND b.rn = 1
+    """).fetchdf()
+    con.close()
+    df["dt_ref"] = pd.to_datetime(df["dt_ref"])
+    df["year"] = df["dt_ref"].dt.year
+    df["full_name"] = df["full_name"].fillna(df["driverid"])
+    return df
+
+
+def _champion_features():
+    st.subheader("Champion Model Features")
+    st.caption("The 17 curated features used by the champion prediction model. "
+               "Visualize how these evolve race-by-race for championship contenders.")
+
+    try:
+        df = _load_champion_abt()
+    except Exception as e:
+        st.error(f"Could not load champion ABT: {e}")
+        return
+
+    years = sorted(df["year"].unique(), reverse=True)
+    year = st.selectbox("Season", years, key="champ_feat_year")
+    df_yr = df[df["year"] == year].sort_values("dt_ref")
+
+    # Pick top drivers by latest standing
+    latest = df_yr.groupby("full_name").last().reset_index()
+    if "standing_position" in latest.columns:
+        top = latest.nsmallest(6, "standing_position")["full_name"].tolist()
+    else:
+        top = latest.nlargest(6, "total_points_last10")["full_name"].tolist()
+
+    all_drivers = sorted(df_yr["full_name"].unique())
+    selected = st.multiselect("Drivers", all_drivers, default=top, key="champ_feat_drivers")
+    if not selected:
+        return
+
+    plot_df = df_yr[df_yr["full_name"].isin(selected)]
+
+    # Feature selector
+    avail = [f for f in CHAMPION_FEATURES if f in plot_df.columns]
+    col1, col2 = st.columns(2)
+    with col1:
+        feat1 = st.selectbox("Feature (top)", avail, index=avail.index("points_pct_of_leader") if "points_pct_of_leader" in avail else 0,
+                              format_func=lambda f: _CHAMPION_LABELS.get(f, f), key="champ_f1")
+    with col2:
+        default_idx = avail.index("standing_position") if "standing_position" in avail else min(1, len(avail)-1)
+        feat2 = st.selectbox("Feature (bottom)", avail, index=default_idx,
+                              format_func=lambda f: _CHAMPION_LABELS.get(f, f), key="champ_f2")
+
+    color_map = {
+        row["full_name"]: get_team_color(row["team_name"])
+        for _, row in plot_df[["full_name", "team_name"]].drop_duplicates().iterrows()
+    }
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                        subplot_titles=[_CHAMPION_LABELS.get(feat1, feat1),
+                                        _CHAMPION_LABELS.get(feat2, feat2)])
+    for driver in selected:
+        d = plot_df[plot_df["full_name"] == driver]
+        color = color_map.get(driver, "#888")
+        fig.add_trace(go.Scatter(x=d["dt_ref"], y=d[feat1], mode="lines+markers",
+                                  name=driver, line=dict(color=color), legendgroup=driver,
+                                  showlegend=True), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d["dt_ref"], y=d[feat2], mode="lines+markers",
+                                  name=driver, line=dict(color=color), legendgroup=driver,
+                                  showlegend=False), row=2, col=1)
+
+    reverse_y2 = feat2 in ("standing_position", "avg_position_last10", "avg_grid_last10")
+    if reverse_y2:
+        fig.update_yaxes(autorange="reversed", row=2, col=1)
+
+    fig.update_layout(height=600, hovermode="x unified",
+                      title=f"Champion Features — {year}")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Correlation heatmap of champion features
+    st.subheader("Feature Correlation (Champion Model)")
+    corr_df = df_yr[avail].corr()
+    labels = [_CHAMPION_LABELS.get(f, f) for f in avail]
+    fig_corr = go.Figure(go.Heatmap(
+        z=corr_df.values, x=labels, y=labels,
+        colorscale="RdBu_r", zmid=0, zmin=-1, zmax=1,
+        text=corr_df.values.round(2), texttemplate="%{text}",
+        textfont=dict(size=9),
+    ))
+    fig_corr.update_layout(height=550, title=f"Feature Correlations — {year}",
+                           xaxis_tickangle=-45)
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Constructor Model Features (curated 11 features)
+# ---------------------------------------------------------------------------
+
+TEAM_FEATURES = [
+    "sum_wins_last10", "sum_podiums_last10", "sum_points_last10",
+    "avg_position_last10", "avg_grid_last10", "team_standing_position",
+    "team_points_pct_of_leader", "team_points_accel",
+    "team_pct_leader_x_wins", "team_pct_leader_x_podiums",
+    "team_pct_leader_x_points",
+]
+
+_TEAM_LABELS = {
+    "sum_wins_last10": "Wins (L10 races)",
+    "sum_podiums_last10": "Podiums (L10 races)",
+    "sum_points_last10": "Points (L10 races)",
+    "avg_position_last10": "Avg Finish Pos (L10)",
+    "avg_grid_last10": "Avg Grid Pos (L10)",
+    "team_standing_position": "Standings Position",
+    "team_points_pct_of_leader": "Points % of Leader",
+    "team_points_accel": "Points Acceleration",
+    "team_pct_leader_x_wins": "Leader% x Wins",
+    "team_pct_leader_x_podiums": "Leader% x Podiums",
+    "team_pct_leader_x_points": "Leader% x Points",
+}
+
+
+@st.cache_data(ttl=3600)
+def _load_team_abt():
+    path = os.path.join(GOLD_DIR, "abt_teams_inseason.parquet")
+    con = get_duckdb_connection()
+    df = con.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
+    con.close()
+    df["dt_ref"] = pd.to_datetime(df["dt_ref"])
+    df["year"] = df["dt_ref"].dt.year
+    return df
+
+
+def _constructor_features():
+    st.subheader("Constructor Model Features")
+    st.caption("The 11 curated features used by the constructor champion prediction model.")
+
+    try:
+        df = _load_team_abt()
+    except Exception as e:
+        st.error(f"Could not load team ABT: {e}")
+        return
+
+    years = sorted(df["year"].unique(), reverse=True)
+    year = st.selectbox("Season", years, key="team_feat_year")
+    df_yr = df[df["year"] == year].sort_values("dt_ref")
+
+    all_teams = sorted(df_yr["team_name"].dropna().unique())
+    latest = df_yr.groupby("team_name").last().reset_index()
+    if "team_standing_position" in latest.columns:
+        top = latest.nsmallest(5, "team_standing_position")["team_name"].tolist()
+    else:
+        top = all_teams[:5]
+
+    selected = st.multiselect("Teams", all_teams, default=top, key="team_feat_teams")
+    if not selected:
+        return
+
+    plot_df = df_yr[df_yr["team_name"].isin(selected)]
+    avail = [f for f in TEAM_FEATURES if f in plot_df.columns]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        feat1 = st.selectbox("Feature (top)", avail,
+                              index=avail.index("team_points_pct_of_leader") if "team_points_pct_of_leader" in avail else 0,
+                              format_func=lambda f: _TEAM_LABELS.get(f, f), key="team_f1")
+    with col2:
+        default_idx = avail.index("team_standing_position") if "team_standing_position" in avail else min(1, len(avail)-1)
+        feat2 = st.selectbox("Feature (bottom)", avail, index=default_idx,
+                              format_func=lambda f: _TEAM_LABELS.get(f, f), key="team_f2")
+
+    color_map = {t: get_team_color(t) for t in selected}
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                        subplot_titles=[_TEAM_LABELS.get(feat1, feat1),
+                                        _TEAM_LABELS.get(feat2, feat2)])
+    for team in selected:
+        d = plot_df[plot_df["team_name"] == team]
+        color = color_map.get(team, "#888")
+        fig.add_trace(go.Scatter(x=d["dt_ref"], y=d[feat1], mode="lines+markers",
+                                  name=team, line=dict(color=color), legendgroup=team,
+                                  showlegend=True), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d["dt_ref"], y=d[feat2], mode="lines+markers",
+                                  name=team, line=dict(color=color), legendgroup=team,
+                                  showlegend=False), row=2, col=1)
+
+    reverse_y2 = feat2 in ("team_standing_position", "avg_position_last10", "avg_grid_last10")
+    if reverse_y2:
+        fig.update_yaxes(autorange="reversed", row=2, col=1)
+
+    fig.update_layout(height=600, hovermode="x unified",
+                      title=f"Constructor Features — {year}")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Correlation heatmap
+    st.subheader("Feature Correlation (Constructor Model)")
+    corr_df = df_yr[avail].corr()
+    labels = [_TEAM_LABELS.get(f, f) for f in avail]
+    fig_corr = go.Figure(go.Heatmap(
+        z=corr_df.values, x=labels, y=labels,
+        colorscale="RdBu_r", zmid=0, zmin=-1, zmax=1,
+        text=corr_df.values.round(2), texttemplate="%{text}",
+        textfont=dict(size=9),
+    ))
+    fig_corr.update_layout(height=500, title=f"Feature Correlations — {year}",
+                           xaxis_tickangle=-45)
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Departure Model Features (curated 24 features)
+# ---------------------------------------------------------------------------
+
+DEPARTURE_FEATURES = [
+    "avg_position_last10", "avg_quali_position_last10", "qtd_top5_last10",
+    "qtd_quali_top10_last10", "total_points_last10", "total_points_race_last10",
+    "total_points_life", "total_points_race_life", "qtd_wins_life",
+    "qtd_top5_life", "qtd_podiums_life", "qtd_grid_top5_life",
+    "driver_age", "seasons_since_last_podium", "seasons_since_last_win",
+    "team_tenure_years", "career_distinct_teams", "teammate_position_gap",
+    "teammate_grid_gap", "team_points_share", "season_points_current",
+    "season_dnf_rate", "trend_win_rate", "trend_podium_rate",
+]
+
+_DEPARTURE_LABELS = {
+    "avg_position_last10": "Avg Finish Pos (L10)",
+    "avg_quali_position_last10": "Avg Quali Pos (L10)",
+    "qtd_top5_last10": "Top 5 Finishes (L10)",
+    "qtd_quali_top10_last10": "Quali Top-10 (L10)",
+    "total_points_last10": "Total Points (L10)",
+    "total_points_race_last10": "Race Points (L10)",
+    "total_points_life": "Career Points",
+    "total_points_race_life": "Career Race Points",
+    "qtd_wins_life": "Career Wins",
+    "qtd_top5_life": "Career Top 5",
+    "qtd_podiums_life": "Career Podiums",
+    "qtd_grid_top5_life": "Career Grid Top 5",
+    "driver_age": "Driver Age",
+    "seasons_since_last_podium": "Seasons Since Last Podium",
+    "seasons_since_last_win": "Seasons Since Last Win",
+    "team_tenure_years": "Team Tenure (years)",
+    "career_distinct_teams": "Career Teams",
+    "teammate_position_gap": "Teammate Finish Gap",
+    "teammate_grid_gap": "Teammate Grid Gap",
+    "team_points_share": "Team Points Share",
+    "season_points_current": "Season Points",
+    "season_dnf_rate": "Season DNF Rate",
+    "trend_win_rate": "Win Rate Trend",
+    "trend_podium_rate": "Podium Rate Trend",
+}
+
+_DEPARTURE_GROUPS = {
+    "Recent Form (L10)": ["avg_position_last10", "avg_quali_position_last10", "qtd_top5_last10",
+                          "qtd_quali_top10_last10", "total_points_last10", "total_points_race_last10"],
+    "Career Stats": ["total_points_life", "total_points_race_life", "qtd_wins_life",
+                     "qtd_top5_life", "qtd_podiums_life", "qtd_grid_top5_life"],
+    "Driver Profile": ["driver_age", "seasons_since_last_podium", "seasons_since_last_win",
+                        "team_tenure_years", "career_distinct_teams"],
+    "Team Dynamics": ["teammate_position_gap", "teammate_grid_gap", "team_points_share",
+                      "season_points_current", "season_dnf_rate"],
+    "Performance Trends": ["trend_win_rate", "trend_podium_rate"],
+}
+
+
+@st.cache_data(ttl=3600)
+def _load_departure_abt():
+    path = os.path.join(GOLD_DIR, "abt_departures_inseason.parquet")
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        SELECT d.*, b.full_name, b.team_name
+        FROM read_parquet('{path}') d
+        LEFT JOIN (
+            SELECT driverid, full_name, team_name,
+                   ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY event_date DESC) AS rn
+            FROM read_parquet('{BRONZE_PATH}')
+        ) b ON d.driverid = b.driverid AND b.rn = 1
+    """).fetchdf()
+    con.close()
+    df["dt_ref"] = pd.to_datetime(df["dt_ref"])
+    df["year"] = df["dt_ref"].dt.year
+    df["full_name"] = df["full_name"].fillna(df["driverid"])
+    return df
+
+
+def _departure_features():
+    st.subheader("Departure Model Features")
+    st.caption("The 24 curated features used by the driver departure model, organized by category.")
+
+    try:
+        df = _load_departure_abt()
+    except Exception as e:
+        st.error(f"Could not load departure ABT: {e}")
+        return
+
+    years = sorted(df["year"].unique(), reverse=True)
+    year = st.selectbox("Season", years, key="dep_feat_year")
+    df_yr = df[df["year"] == year].sort_values("dt_ref")
+
+    # Default: pick a mix of drivers
+    all_drivers = sorted(df_yr["full_name"].unique())
+    default = all_drivers[:6] if len(all_drivers) >= 6 else all_drivers
+    selected = st.multiselect("Drivers", all_drivers, default=default, key="dep_feat_drivers")
+    if not selected:
+        return
+
+    plot_df = df_yr[df_yr["full_name"].isin(selected)]
+
+    # Group selector
+    group = st.selectbox("Feature group", list(_DEPARTURE_GROUPS.keys()), key="dep_group")
+    group_feats = [f for f in _DEPARTURE_GROUPS[group] if f in plot_df.columns]
+
+    if not group_feats:
+        st.warning("No features available for this group.")
+        return
+
+    color_map = {
+        row["full_name"]: get_team_color(row["team_name"])
+        for _, row in plot_df[["full_name", "team_name"]].drop_duplicates().iterrows()
+    }
+
+    # Plot up to 2 features side by side if group has multiple
+    n_plots = min(2, len(group_feats))
+    cols = st.columns(n_plots)
+    feat_selections = []
+    for i, col in enumerate(cols):
+        with col:
+            f = st.selectbox(f"Feature {i+1}", group_feats,
+                             index=min(i, len(group_feats)-1),
+                             format_func=lambda f: _DEPARTURE_LABELS.get(f, f),
+                             key=f"dep_f{i}")
+            feat_selections.append(f)
+
+    fig = make_subplots(rows=1, cols=n_plots, shared_xaxes=True,
+                        subplot_titles=[_DEPARTURE_LABELS.get(f, f) for f in feat_selections],
+                        horizontal_spacing=0.08)
+    for driver in selected:
+        d = plot_df[plot_df["full_name"] == driver]
+        color = color_map.get(driver, "#888")
+        for i, feat in enumerate(feat_selections):
+            fig.add_trace(go.Scatter(
+                x=d["dt_ref"], y=d[feat], mode="lines+markers",
+                name=driver, line=dict(color=color), legendgroup=driver,
+                showlegend=(i == 0),
+            ), row=1, col=i+1)
+            if feat in ("avg_position_last10", "avg_quali_position_last10"):
+                fig.update_yaxes(autorange="reversed", row=1, col=i+1)
+
+    fig.update_layout(height=450, hovermode="x unified",
+                      title=f"Departure Features ({group}) — {year}")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # End-of-season snapshot: bar chart comparing drivers on selected feature
+    st.subheader("End-of-Season Snapshot")
+    snap_feat = st.selectbox("Feature to compare", group_feats,
+                             format_func=lambda f: _DEPARTURE_LABELS.get(f, f),
+                             key="dep_snap_feat")
+    latest = plot_df.groupby("full_name").last().reset_index()
+    latest = latest.sort_values(snap_feat, ascending=False)
+    colors = [color_map.get(d, "#888") for d in latest["full_name"]]
+    fig_bar = go.Figure(go.Bar(
+        x=latest["full_name"], y=latest[snap_feat],
+        marker_color=colors,
+    ))
+    fig_bar.update_layout(
+        title=f"{_DEPARTURE_LABELS.get(snap_feat, snap_feat)} — Latest Values ({year})",
+        xaxis_title="Driver", yaxis_title=_DEPARTURE_LABELS.get(snap_feat, snap_feat),
+        height=400,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
 
 
 def _points_distribution(df):

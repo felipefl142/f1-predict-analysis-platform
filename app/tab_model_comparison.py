@@ -44,6 +44,11 @@ _ID_COLS = {
     "f1_departure": ["driverid"],
 }
 
+_CHAMPIONS_CSV = {
+    "f1_champion": "data/champions.csv",
+    "f1_constructor_champion": "data/constructors_champions.csv",
+}
+
 # Consistent color palette for models
 MODEL_COLORS = {
     "LogisticRegression": "#636EFA",
@@ -167,8 +172,18 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
     abt = _load_abt(experiment_name)
     target_col = _TARGET_COL[experiment_name]
     id_cols = _ID_COLS[experiment_name]
+    id_col = id_cols[0]  # Primary ID for top-1 (driverid or teamid)
     features = _get_feature_columns(abt, id_cols)
     df_train, df_test, df_oot, test_year, oot_year = _split_data(abt, target_col, oot_year)
+
+    # Load actual champions mapping if applicable
+    champ_map = {}
+    csv_path = _CHAMPIONS_CSV.get(experiment_name)
+    if csv_path:
+        csv_full = os.path.join(BASE_DIR, csv_path)
+        if os.path.exists(csv_full):
+            champs_df = pd.read_csv(csv_full)
+            champ_map = dict(zip(champs_df["year"], champs_df[id_col]))
 
     model = _load_model(run_id)
     if not hasattr(model, "predict_proba"):
@@ -177,6 +192,8 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
 
     splits = {}
     for name, split_df in [("train", df_train), ("test", df_test), ("oot", df_oot)]:
+        # Drop rows where target is NaN (e.g. future seasons not yet decided)
+        split_df = split_df.dropna(subset=[target_col])
         if split_df.empty or split_df[target_col].nunique() < 2:
             continue
         y_true = split_df[target_col].values
@@ -186,6 +203,21 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
         fpr, tpr, _ = sk_metrics.roc_curve(y_true, y_prob)
         precision, recall, _ = sk_metrics.precision_recall_curve(y_true, y_prob)
         cm = sk_metrics.confusion_matrix(y_true, y_pred)
+
+        # Calculate Top-1 Accuracy if champions are known
+        top1_acc = None
+        if champ_map:
+            tmp = split_df[[id_col, "dt_ref"]].copy()
+            tmp["year"] = pd.to_datetime(tmp["dt_ref"]).dt.year
+            tmp["prob"] = y_prob
+            correct, total = 0, 0
+            for (year, dt_ref), grp in tmp.groupby(["year", "dt_ref"]):
+                if year in champ_map:
+                    top_id = grp.loc[grp["prob"].idxmax(), id_col]
+                    if top_id == champ_map[year]:
+                        correct += 1
+                    total += 1
+            top1_acc = correct / total if total > 0 else None
 
         splits[name] = {
             "fpr": fpr.tolist(),
@@ -197,11 +229,22 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
             "f1": float(sk_metrics.f1_score(y_true, y_pred)),
             "log_loss": float(sk_metrics.log_loss(y_true, y_prob)),
             "brier": float(sk_metrics.brier_score_loss(y_true, y_prob)),
+            "top1_acc": top1_acc,
             "cm": cm.tolist(),
             "n_samples": len(y_true),
         }
 
-    return splits, test_year, oot_year
+    # Extract feature importances
+    feature_importance = None
+    model_step = model.named_steps.get("model") if hasattr(model, "named_steps") else None
+    if model_step is not None and hasattr(model_step, "feature_importances_"):
+        fi = model_step.feature_importances_
+        feature_importance = sorted(
+            zip(model_features, fi.tolist()),
+            key=lambda x: abs(x[1]), reverse=True,
+        )
+
+    return splits, test_year, oot_year, feature_importance
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +264,7 @@ def _build_metrics_table(selected_runs, evaluations):
             label = "Test" if split == "test" else "OOT"
             row[f"ROC-AUC ({label})"] = s["roc_auc"]
             row[f"PR-AUC ({label})"] = s["pr_auc"]
+            row[f"Top-1 Acc ({label})"] = s["top1_acc"]
             row[f"F1 ({label})"] = s["f1"]
             row[f"Log Loss ({label})"] = s["log_loss"]
             row[f"Brier ({label})"] = s["brier"]
@@ -233,7 +277,7 @@ def _build_metrics_table(selected_runs, evaluations):
 def _style_metrics(df):
     """Apply conditional coloring: green=good, red=bad per column."""
     # For these metrics, higher is better
-    higher_better = [c for c in df.columns if any(m in c for m in ("ROC-AUC", "PR-AUC", "F1"))]
+    higher_better = [c for c in df.columns if any(m in c for m in ("ROC-AUC", "PR-AUC", "F1", "Top-1 Acc"))]
     # For these, lower is better
     lower_better = [c for c in df.columns if any(m in c for m in ("Log Loss", "Brier"))]
 
@@ -403,6 +447,51 @@ def _plot_confusion_matrices(selected_runs, evaluations, split_name):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _plot_feature_importances(selected_runs, evaluations):
+    """Render horizontal bar charts of feature importances, one per model."""
+    models_with_fi = []
+    for run in selected_runs:
+        fi = evaluations[run["run_id"]][3]
+        if fi:
+            models_with_fi.append((run["model_type"], fi))
+
+    if not models_with_fi:
+        st.info("No feature importance data available (models may lack feature_importances_).")
+        return
+
+    n = len(models_with_fi)
+    fig = make_subplots(
+        rows=1, cols=n,
+        subplot_titles=[m[0] for m in models_with_fi],
+        horizontal_spacing=0.15,
+    )
+
+    for i, (model_name, fi) in enumerate(models_with_fi, 1):
+        # Show all features, sorted ascending so highest is on top
+        names = [f[0] for f in reversed(fi)]
+        values = [f[1] for f in reversed(fi)]
+        color = MODEL_COLORS.get(model_name, "#888")
+        fig.add_trace(
+            go.Bar(
+                x=values, y=names,
+                orientation="h",
+                marker_color=color,
+                name=model_name,
+                showlegend=False,
+                hovertemplate="%{y}: %{x:.4f}<extra></extra>",
+            ),
+            row=1, col=i,
+        )
+        fig.update_xaxes(title_text="Importance", row=1, col=i)
+
+    n_features = max(len(fi) for _, fi in models_with_fi)
+    fig.update_layout(
+        title="Feature Importances",
+        height=max(400, n_features * 22 + 80),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ---------------------------------------------------------------------------
 # Main render
 # ---------------------------------------------------------------------------
@@ -468,7 +557,7 @@ def render_model_comparison():
     selected_runs = [r for r in selected_runs if r["run_id"] in evaluations]
 
     # Show split info
-    _, test_year, oot_year = next(iter(evaluations.values()))
+    _, test_year, oot_year, _ = next(iter(evaluations.values()))
     st.caption(f"Test year: **{test_year}** | Out-of-time year: **{oot_year}**")
 
     # --- Metrics table ---
@@ -504,3 +593,7 @@ def render_model_comparison():
     # --- Confusion matrices ---
     st.subheader("Confusion Matrices")
     _plot_confusion_matrices(selected_runs, evaluations, split_choice)
+
+    # --- Feature importances ---
+    st.subheader("Feature Importances")
+    _plot_feature_importances(selected_runs, evaluations)

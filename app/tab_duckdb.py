@@ -132,6 +132,127 @@ EXAMPLE_QUERIES = {
         "    ROUND(SUM(fl_departed) * 100.0 / COUNT(*), 2)\n"
         "FROM read_parquet('data/gold/abt_departures.parquet')"
     ),
+
+    # --- Champion model curated features ---
+    "Champion features: current standings race-by-race (2024)": (
+        "SELECT dt_ref, driverid, standing_position,\n"
+        "    ROUND(points_pct_of_leader, 3) AS points_pct_of_leader,\n"
+        "    ROUND(gap_momentum_3r, 3) AS gap_momentum_3r,\n"
+        "    ROUND(points_accel, 3) AS points_accel,\n"
+        "    qtd_wins_last10, qtd_podiums_last10, total_points_last10,\n"
+        "    ROUND(avg_position_last10, 2) AS avg_position_last10\n"
+        "FROM read_parquet('data/gold/abt_champions_inseason.parquet')\n"
+        "WHERE YEAR(dt_ref) = 2024 AND standing_position <= 5\n"
+        "ORDER BY dt_ref, standing_position"
+    ),
+    "Champion features: interaction features by season": (
+        "SELECT YEAR(dt_ref) AS season, driverid,\n"
+        "    MAX(ROUND(pct_leader_x_wins, 3)) AS max_ldr_x_wins,\n"
+        "    MAX(ROUND(pct_leader_x_podiums, 3)) AS max_ldr_x_podiums,\n"
+        "    MAX(ROUND(pct_leader_x_points, 3)) AS max_ldr_x_points,\n"
+        "    MIN(standing_position) AS best_standing,\n"
+        "    fl_champion\n"
+        "FROM read_parquet('data/gold/abt_champions_inseason.parquet')\n"
+        "WHERE fl_champion IS NOT NULL\n"
+        "GROUP BY season, driverid, fl_champion\n"
+        "HAVING fl_champion = 1\n"
+        "ORDER BY season DESC"
+    ),
+    "Champion features: momentum leaders per race (2024)": (
+        "WITH ranked AS (\n"
+        "    SELECT dt_ref, driverid, standing_position,\n"
+        "        ROUND(gap_momentum_3r, 4) AS gap_momentum_3r,\n"
+        "        ROUND(points_accel, 4) AS points_accel,\n"
+        "        ROW_NUMBER() OVER (PARTITION BY dt_ref ORDER BY gap_momentum_3r DESC) AS momentum_rank\n"
+        "    FROM read_parquet('data/gold/abt_champions_inseason.parquet')\n"
+        "    WHERE YEAR(dt_ref) = 2024\n"
+        ")\n"
+        "SELECT * FROM ranked WHERE momentum_rank <= 3\n"
+        "ORDER BY dt_ref, momentum_rank"
+    ),
+
+    # --- Constructor model curated features ---
+    "Constructor features: team standings race-by-race (2024)": (
+        "SELECT dt_ref, team_name, team_standing_position,\n"
+        "    ROUND(team_points_pct_of_leader, 3) AS team_pct_leader,\n"
+        "    ROUND(team_points_accel, 3) AS team_points_accel,\n"
+        "    sum_wins_last10, sum_podiums_last10, sum_points_last10,\n"
+        "    ROUND(avg_position_last10, 2) AS avg_pos_l10\n"
+        "FROM read_parquet('data/gold/abt_teams_inseason.parquet')\n"
+        "WHERE YEAR(dt_ref) = 2024 AND team_standing_position <= 5\n"
+        "ORDER BY dt_ref, team_standing_position"
+    ),
+    "Constructor features: interaction features by season": (
+        "SELECT YEAR(dt_ref) AS season, team_name,\n"
+        "    MAX(ROUND(team_pct_leader_x_wins, 3)) AS max_ldr_x_wins,\n"
+        "    MAX(ROUND(team_pct_leader_x_podiums, 3)) AS max_ldr_x_podiums,\n"
+        "    MAX(ROUND(team_pct_leader_x_points, 3)) AS max_ldr_x_points,\n"
+        "    MIN(team_standing_position) AS best_standing,\n"
+        "    fl_constructor_champion\n"
+        "FROM read_parquet('data/gold/abt_teams_inseason.parquet')\n"
+        "WHERE fl_constructor_champion IS NOT NULL\n"
+        "GROUP BY season, team_name, fl_constructor_champion\n"
+        "HAVING fl_constructor_champion = 1\n"
+        "ORDER BY season DESC"
+    ),
+
+    # --- Departure model curated features ---
+    "Departure features: driver risk profile (latest per driver, 2024)": (
+        "WITH latest AS (\n"
+        "    SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY dt_ref DESC) AS rn\n"
+        "    FROM read_parquet('data/gold/abt_departures_inseason.parquet')\n"
+        "    WHERE YEAR(dt_ref) = 2024\n"
+        ")\n"
+        "SELECT driverid, driver_age, team_tenure_years, career_distinct_teams,\n"
+        "    seasons_since_last_win, seasons_since_last_podium,\n"
+        "    ROUND(teammate_position_gap, 2) AS teammate_pos_gap,\n"
+        "    ROUND(team_points_share, 3) AS team_pts_share,\n"
+        "    ROUND(season_dnf_rate, 3) AS dnf_rate,\n"
+        "    fl_departed\n"
+        "FROM latest WHERE rn = 1\n"
+        "ORDER BY fl_departed DESC, teammate_position_gap"
+    ),
+    "Departure features: teammate dynamics race-by-race (2024)": (
+        "SELECT dt_ref, driverid,\n"
+        "    ROUND(teammate_position_gap, 2) AS teammate_pos_gap,\n"
+        "    ROUND(teammate_grid_gap, 2) AS teammate_grid_gap,\n"
+        "    ROUND(team_points_share, 3) AS team_pts_share,\n"
+        "    season_points_current\n"
+        "FROM read_parquet('data/gold/abt_departures_inseason.parquet')\n"
+        "WHERE YEAR(dt_ref) = 2024\n"
+        "    AND driverid IN ('daniel_ricciardo', 'logan_sargeant', 'kevin_magnussen')\n"
+        "ORDER BY driverid, dt_ref"
+    ),
+    "Departure features: performance trends for departed drivers": (
+        "WITH departed AS (\n"
+        "    SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid ORDER BY dt_ref DESC) AS rn\n"
+        "    FROM read_parquet('data/gold/abt_departures_inseason.parquet')\n"
+        "    WHERE fl_departed = 1\n"
+        ")\n"
+        "SELECT driverid, YEAR(dt_ref) AS season,\n"
+        "    ROUND(trend_win_rate, 4) AS trend_win_rate,\n"
+        "    ROUND(trend_podium_rate, 4) AS trend_podium_rate,\n"
+        "    ROUND(avg_position_last10, 2) AS avg_pos_l10,\n"
+        "    total_points_last10, driver_age, team_tenure_years\n"
+        "FROM departed WHERE rn = 1\n"
+        "ORDER BY season DESC, avg_position_last10"
+    ),
+    "Departure features: career longevity vs departure": (
+        "WITH latest AS (\n"
+        "    SELECT *, ROW_NUMBER() OVER (PARTITION BY driverid, YEAR(dt_ref) ORDER BY dt_ref DESC) AS rn\n"
+        "    FROM read_parquet('data/gold/abt_departures_inseason.parquet')\n"
+        ")\n"
+        "SELECT fl_departed,\n"
+        "    ROUND(AVG(driver_age), 1) AS avg_age,\n"
+        "    ROUND(AVG(team_tenure_years), 1) AS avg_tenure,\n"
+        "    ROUND(AVG(career_distinct_teams), 1) AS avg_teams,\n"
+        "    ROUND(AVG(seasons_since_last_win), 1) AS avg_seasons_since_win,\n"
+        "    ROUND(AVG(teammate_position_gap), 2) AS avg_teammate_gap,\n"
+        "    COUNT(DISTINCT driverid) AS n_drivers\n"
+        "FROM latest WHERE rn = 1 AND fl_departed IS NOT NULL\n"
+        "GROUP BY fl_departed\n"
+        "ORDER BY fl_departed"
+    ),
 }
 
 

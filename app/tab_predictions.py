@@ -9,8 +9,44 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from app.helpers import get_team_color
+import os
+
+from app.helpers import get_duckdb_connection, get_team_color, BASE_DIR, BRONZE_PATH
 from ml.timefm_predictor import TIMESFM_AVAILABLE
+
+RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
+
+# Inject CSS once for styled tables: alternating rows + bigger font.
+# Uses transparent overlays so it works on both light and dark themes.
+_TABLE_CSS = """
+<style>
+div[data-testid="stDataFrame"] table {
+    font-size: 15px !important;
+}
+div[data-testid="stDataFrame"] table tbody tr:nth-child(even) {
+    background-color: rgba(128, 128, 128, 0.08);
+}
+div[data-testid="stDataFrame"] table tbody tr:nth-child(odd) {
+    background-color: rgba(128, 128, 128, 0.00);
+}
+</style>
+"""
+
+
+def _styled_table(df, fmt=None, hide_index=True):
+    """Display a dataframe with alternating row colors and larger font."""
+    st.markdown(_TABLE_CSS, unsafe_allow_html=True)
+    styler = df.style
+    # Alternating row backgrounds via Styler (complements CSS for st.dataframe)
+    styler = styler.set_properties(**{"font-size": "15px"})
+    row_colors = ["rgba(128,128,128,0.06)", "rgba(128,128,128,0.14)"]
+    styler = styler.apply(
+        lambda row: [f"background-color: {row_colors[row.name % 2]}"] * len(row),
+        axis=1,
+    )
+    if fmt:
+        styler = styler.format(fmt)
+    st.dataframe(styler, use_container_width=True, hide_index=hide_index)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +116,81 @@ def _get_timesfm_departures(year):
     from ml.predict import SILVER_DIR, BRONZE_PATH
     from ml.timefm_predictor import predict_departures_timesfm
     return predict_departures_timesfm(SILVER_DIR, BRONZE_PATH, year)
+
+
+@st.cache_data(ttl=3600)
+def _get_actual_champion(year, experiment_name):
+    """Return the actual champion driverid/teamid for a given year."""
+    import os
+    from app.helpers import BASE_DIR
+    csv_map = {
+        "f1_champion": "data/champions.csv",
+        "f1_constructor_champion": "data/constructors_champions.csv",
+    }
+    id_col_map = {
+        "f1_champion": "driverid",
+        "f1_constructor_champion": "teamid",
+    }
+    csv_path = csv_map.get(experiment_name)
+    if not csv_path:
+        return None
+    full_path = os.path.join(BASE_DIR, csv_path)
+    if not os.path.exists(full_path):
+        return None
+    df = pd.read_csv(full_path)
+    row = df[df["year"] == year]
+    return row[id_col_map[experiment_name]].iloc[0] if not row.empty else None
+
+
+def _top1_accuracy_chart(data, id_col, actual_id, title):
+    """Render a chart comparing Model's #1 Pick probability vs. Actual Champion probability."""
+    # Find model's #1 pick at each race
+    top1 = data.loc[data.groupby("dt_ref")["prob_champion" if id_col=="driverid" else "prob_constructor_champion"].idxmax()].copy()
+    top1 = top1.sort_values("dt_ref")
+    
+    # Prob of actual champion
+    actual_data = data[data[id_col] == actual_id].sort_values("dt_ref") if actual_id else pd.DataFrame()
+
+    fig = go.Figure()
+    
+    all_dates = sorted(data["dt_ref"].unique())
+    date_labels = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in all_dates]
+
+    # Trace 1: Model's top pick
+    prob_col = "prob_champion" if id_col=="driverid" else "prob_constructor_champion"
+    fig.add_trace(go.Scatter(
+        x=[pd.Timestamp(d).strftime("%Y-%m-%d") for d in top1["dt_ref"]],
+        y=top1[prob_col],
+        mode="lines+markers",
+        name="Model's #1 Pick",
+        line=dict(color="#EF553B", width=3),
+        marker=dict(size=8),
+        hovertemplate="Model's #1: %{customdata}<br>Prob: %{y:.1%}<extra></extra>",
+        customdata=top1["full_name" if id_col=="driverid" else "team_name"]
+    ))
+
+    # Trace 2: Actual champion (if known)
+    if not actual_data.empty:
+        fig.add_trace(go.Scatter(
+            x=[pd.Timestamp(d).strftime("%Y-%m-%d") for d in actual_data["dt_ref"]],
+            y=actual_data[prob_col],
+            mode="lines+markers",
+            name="Actual Champion",
+            line=dict(color="#00CC96", width=2, dash="dash"),
+            marker=dict(size=6),
+            hovertemplate="Actual Champ Prob: %{y:.1%}<extra></extra>"
+        ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Race date",
+        yaxis_title="Win Probability",
+        yaxis_tickformat=".0%",
+        hovermode="x unified",
+        xaxis=dict(type="category", categoryorder="array", categoryarray=date_labels),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +289,7 @@ def _render_model_comparison_table(experiment_name):
         st.dataframe(
             comp.style.format({
                 c: "{:.4f}" for c in ["auc_train", "auc_test", "auc_oot",
-                                      "cv_ap", "tuned_cv_ap",
+                                      "cv_ap", "tuned_cv_ap", "top1_acc_test", "top1_acc_oot",
                                       "cv_auc", "tuned_cv_auc"] if c in comp.columns
             }),
             use_container_width=True,
@@ -205,6 +316,10 @@ def render_predictions():
         _render_team_predictions()
     else:
         _render_departure_predictions()
+
+    st.divider()
+    _render_current_standings()
+    _render_last_race_results()
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +367,15 @@ def _render_champion_predictions():
         st.warning("Select at least one driver.")
         return
 
+    # Add Top-1 Accuracy Evolution Chart
+    actual_champ = _get_actual_champion(selected_year, "f1_champion")
+    with st.expander("📊 View Top-1 Prediction Evolution", expanded=True):
+        fig_top1 = _top1_accuracy_chart(
+            data, "driverid", actual_champ, 
+            f"{selected_year} Model #1 Pick vs Actual Champion"
+        )
+        st.plotly_chart(fig_top1, use_container_width=True)
+
     plot = data[data["driverid"].isin(selected)].copy()
     plot["label"] = plot["driverid"].map(driver_names)
     color_map = {
@@ -278,10 +402,10 @@ def _render_champion_predictions():
 
     st.subheader("Latest standings")
     latest_sel = latest[latest["driverid"].isin(selected)].sort_values("prob_champion", ascending=False)
-    st.dataframe(
-        latest_sel[["full_name", "prob_champion"]].style.format({"prob_champion": "{:.2%}"}),
-        use_container_width=True,
-    )
+    display_champ = latest_sel[["full_name", "prob_champion"]].rename(
+        columns={"full_name": "Driver", "prob_champion": "Win Probability"}
+    ).reset_index(drop=True)
+    _styled_table(display_champ, fmt={"Win Probability": "{:.2%}"})
 
     with st.expander("Model Comparison"):
         _render_model_comparison_table("f1_champion")
@@ -332,6 +456,15 @@ def _render_team_predictions():
         st.warning("Select at least one team.")
         return
 
+    # Add Top-1 Accuracy Evolution Chart
+    actual_team = _get_actual_champion(selected_year, "f1_constructor_champion")
+    with st.expander("📊 View Top-1 Prediction Evolution", expanded=True):
+        fig_top1 = _top1_accuracy_chart(
+            data, "teamid", actual_team, 
+            f"{selected_year} Model #1 Pick vs Actual Constructor Champion"
+        )
+        st.plotly_chart(fig_top1, use_container_width=True)
+
     plot = data[data["teamid"].isin(selected)].copy()
     plot["label"] = plot["teamid"].map(team_names)
     color_map = {name: get_team_color(name) for name in plot["label"].unique()}
@@ -357,12 +490,10 @@ def _render_team_predictions():
     latest_sel = latest[latest["teamid"].isin(selected)].sort_values(
         "prob_constructor_champion", ascending=False
     )
-    st.dataframe(
-        latest_sel[["team_name", "prob_constructor_champion"]].style.format(
-            {"prob_constructor_champion": "{:.2%}"}
-        ),
-        use_container_width=True,
-    )
+    display_team = latest_sel[["team_name", "prob_constructor_champion"]].rename(
+        columns={"team_name": "Team", "prob_constructor_champion": "Win Probability"}
+    ).reset_index(drop=True)
+    _styled_table(display_team, fmt={"Win Probability": "{:.2%}"})
 
     with st.expander("Model Comparison"):
         _render_model_comparison_table("f1_constructor_champion")
@@ -454,13 +585,223 @@ def _render_departure_predictions():
     tier_str = latest_sel["risk_tier"].astype(str)
     prob_str = latest_sel["prob_departure"].apply(lambda p: f"({p:.1%})")
     latest_sel["Risk"] = tier_str.map(tier_colors) + " " + tier_str + " " + prob_str
-    st.dataframe(
-        latest_sel[["full_name", "team_name", "Risk"]].rename(
-            columns={"full_name": "Driver", "team_name": "Team"}
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    display_dep = latest_sel[["full_name", "team_name", "Risk"]].rename(
+        columns={"full_name": "Driver", "team_name": "Team"}
+    ).reset_index(drop=True)
+    _styled_table(display_dep)
 
     with st.expander("Model Comparison"):
         _render_model_comparison_table("f1_departure")
+
+
+# ---------------------------------------------------------------------------
+# Current Standings & Last Race Results
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def _load_current_standings():
+    """Compute current-season driver standings from bronze results."""
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        WITH current_year AS (
+            SELECT MAX(year) AS yr FROM read_parquet('{BRONZE_PATH}') WHERE mode = 'Race'
+        )
+        SELECT
+            r.driverid,
+            r.full_name,
+            r.team_name,
+            r.team_color,
+            SUM(r.points) AS total_points,
+            COUNT(*) AS races,
+            SUM(CASE WHEN r.position = 1 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN r.position <= 3 THEN 1 ELSE 0 END) AS podiums,
+            ROUND(AVG(r.position), 1) AS avg_position
+        FROM read_parquet('{BRONZE_PATH}') r, current_year c
+        WHERE r.year = c.yr AND r.mode = 'Race'
+        GROUP BY r.driverid, r.full_name, r.team_name, r.team_color
+        ORDER BY total_points DESC
+    """).fetchdf()
+    con.close()
+    return df
+
+
+def _fmt_laptime(ns):
+    """Format nanosecond timedelta as m:ss.SSS or ss.SSS."""
+    if pd.isna(ns) or ns == 0:
+        return ""
+    total_ms = ns / 1e6
+    mins = int(total_ms // 60000)
+    secs = (total_ms % 60000) / 1000
+    if mins > 0:
+        return f"{mins}:{secs:06.3f}"
+    return f"{secs:.3f}"
+
+
+def _fmt_race_time(ns, is_winner=False):
+    """Format race time: absolute for winner, gap for others."""
+    if pd.isna(ns) or ns == 0:
+        return ""
+    if is_winner:
+        total_s = ns / 1e9
+        h = int(total_s // 3600)
+        m = int((total_s % 3600) // 60)
+        s = total_s % 60
+        return f"{h}:{m:02d}:{s:06.3f}"
+    return f"+{ns / 1e9:.3f}s"
+
+
+@st.cache_data(ttl=3600)
+def _load_season_events():
+    """Return list of (round_number, event_name, event_date) for the current season."""
+    con = get_duckdb_connection()
+    df = con.execute(f"""
+        WITH current_year AS (
+            SELECT MAX(year) AS yr FROM read_parquet('{BRONZE_PATH}') WHERE mode = 'Race'
+        )
+        SELECT DISTINCT r.round_number, r.event_name, r.event_date, r.year
+        FROM read_parquet('{BRONZE_PATH}') r, current_year c
+        WHERE r.year = c.yr AND r.mode = 'Race'
+        ORDER BY r.round_number DESC
+    """).fetchdf()
+    con.close()
+    return df
+
+
+@st.cache_data(ttl=3600)
+def _load_race_results(year, round_number):
+    """Load race results for a specific event, joining raw R + Q files for extra data."""
+    con = get_duckdb_connection()
+    race_file = os.path.join(RAW_DIR, f"{year}_{round_number:02d}_R.parquet")
+    quali_file = os.path.join(RAW_DIR, f"{year}_{round_number:02d}_Q.parquet")
+
+    has_quali = os.path.exists(quali_file)
+    if has_quali:
+        df = con.execute(f"""
+            SELECT
+                r.Position AS position,
+                r.FullName AS full_name,
+                r.TeamName AS team_name,
+                r.GridPosition AS grid_position,
+                r.Points AS points,
+                r.Status AS status,
+                r.EventName AS event_name,
+                r.Date AS event_date,
+                (r.GridPosition - r.Position) AS positions_gained,
+                r.Time AS race_time,
+                q.Position AS quali_position,
+                COALESCE(q.Q3, q.Q2, q.Q1) AS best_quali_time
+            FROM read_parquet('{race_file}') r
+            LEFT JOIN read_parquet('{quali_file}') q ON r.DriverId = q.DriverId
+            ORDER BY r.Position
+        """).fetchdf()
+    else:
+        df = con.execute(f"""
+            SELECT
+                Position AS position,
+                FullName AS full_name,
+                TeamName AS team_name,
+                GridPosition AS grid_position,
+                Points AS points,
+                Status AS status,
+                EventName AS event_name,
+                Date AS event_date,
+                (GridPosition - Position) AS positions_gained,
+                Time AS race_time,
+                NULL AS quali_position,
+                NULL AS best_quali_time
+            FROM read_parquet('{race_file}')
+            ORDER BY Position
+        """).fetchdf()
+    con.close()
+    return df
+
+
+def _format_race_table(results):
+    """Format a race results DataFrame for display."""
+    display = results.copy()
+    # Cast float columns to nullable int for clean display
+    for col in ("position", "grid_position", "quali_position", "points"):
+        if col in display.columns:
+            display[col] = pd.array(display[col], dtype=pd.Int64Dtype())
+    # Format best lap time (race Time column: winner = absolute, rest = gap)
+    display["Race Time"] = [
+        _fmt_race_time(t, i == 0)
+        for i, t in enumerate(display["race_time"])
+    ]
+    # Format quali time
+    display["Quali Time"] = display["best_quali_time"].apply(_fmt_laptime)
+    # Format positions gained
+    display["+/-"] = display["positions_gained"].apply(
+        lambda x: f"+{int(x)}" if pd.notna(x) and x > 0 else (str(int(x)) if pd.notna(x) else "")
+    )
+
+    cols = {
+        "position": "Pos", "full_name": "Driver", "team_name": "Team",
+        "quali_position": "Quali", "grid_position": "Grid", "+/-": "+/-",
+        "Quali Time": "Quali Time", "Race Time": "Race Time",
+        "points": "Points", "status": "Status",
+    }
+    out = display[[c for c in cols if c in display.columns]].rename(columns=cols)
+    return out
+
+
+def _render_current_standings():
+    try:
+        standings = _load_current_standings()
+    except Exception:
+        return
+
+    if standings.empty:
+        return
+
+    st.subheader("Current Driver Standings")
+    standings["Pos"] = range(1, len(standings) + 1)
+    for col in ("total_points", "races", "wins", "podiums"):
+        standings[col] = standings[col].astype(int)
+    display = standings[["Pos", "full_name", "team_name", "total_points",
+                         "races", "wins", "podiums", "avg_position"]].rename(columns={
+        "full_name": "Driver", "team_name": "Team", "total_points": "Points",
+        "races": "Races", "wins": "Wins", "podiums": "Podiums", "avg_position": "Avg Pos",
+    })
+    _styled_table(display, fmt={"Avg Pos": "{:.1f}"})
+
+
+def _render_last_race_results():
+    try:
+        events = _load_season_events()
+    except Exception:
+        return
+
+    if events.empty:
+        return
+
+    year = int(events["year"].iloc[0])
+    latest_round = int(events["round_number"].iloc[0])
+
+    # Last race
+    latest_event = events[events["round_number"] == latest_round].iloc[0]
+    race_name = latest_event["event_name"]
+    race_date = pd.to_datetime(latest_event["event_date"]).strftime("%Y-%m-%d")
+
+    st.subheader(f"Last Race: {race_name} ({race_date})")
+    try:
+        results = _load_race_results(year, latest_round)
+        _styled_table(_format_race_table(results))
+    except Exception as e:
+        st.error(f"Could not load results: {e}")
+
+    # Event selector for other races
+    if len(events) > 1:
+        st.subheader("Season Race Results")
+        event_options = {
+            f"R{int(row['round_number']):02d} — {row['event_name']} ({pd.to_datetime(row['event_date']).strftime('%Y-%m-%d')})": int(row["round_number"])
+            for _, row in events.iterrows()
+        }
+        selected_label = st.selectbox("Select race", list(event_options.keys()),
+                                      index=1, key="race_event_selector")
+        selected_round = event_options[selected_label]
+        try:
+            other_results = _load_race_results(year, selected_round)
+            _styled_table(_format_race_table(other_results))
+        except Exception as e:
+            st.error(f"Could not load results: {e}")

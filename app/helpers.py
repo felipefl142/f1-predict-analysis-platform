@@ -56,6 +56,9 @@ AVAILABLE_TABLES = {
     "Silver — Features (Last 40)": f"read_parquet('{SILVER_DIR}/fs_driver_last40.parquet')",
     "Silver — Features (All Windows)": f"read_parquet('{SILVER_DIR}/fs_driver_all.parquet')",
     "Gold — Champion ABT": f"read_parquet('{GOLD_DIR}/abt_champions.parquet')",
+    "Gold — Champion ABT (In-Season)": f"read_parquet('{GOLD_DIR}/abt_champions_inseason.parquet')",
     "Gold — Teams ABT": f"read_parquet('{GOLD_DIR}/abt_teams.parquet')",
+    "Gold — Teams ABT (In-Season)": f"read_parquet('{GOLD_DIR}/abt_teams_inseason.parquet')",
     "Gold — Departures ABT": f"read_parquet('{GOLD_DIR}/abt_departures.parquet')",
+    "Gold — Departures ABT (In-Season)": f"read_parquet('{GOLD_DIR}/abt_departures_inseason.parquet')",
 }
