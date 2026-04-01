@@ -179,7 +179,8 @@ def predict_champions(year: int, model=None) -> pd.DataFrame:
     abt["prob_champion"] = model.predict_proba(abt[feat_cols])[:, 1]
 
     result = abt[["dt_ref", "driverid", "prob_champion",
-                   "season_race_number", "season_fraction"]].merge(
+                   "season_race_number", "season_fraction",
+                   "standing_position"]].merge(
         _driver_meta(), on="driverid", how="left"
     )
     result["year"] = year
@@ -227,7 +228,8 @@ def predict_teams(year: int, model=None) -> pd.DataFrame:
 
     return abt[["dt_ref", "teamid", "team_name",
                 "prob_constructor_champion",
-                "season_race_number", "season_fraction", "year"]].sort_values(
+                "season_race_number", "season_fraction",
+                "team_standing_position", "year"]].sort_values(
         ["dt_ref", "prob_constructor_champion"], ascending=[True, False]
     )
 

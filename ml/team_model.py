@@ -23,18 +23,15 @@ TEAM_FEATURES = [
     # Team performance (last 10 sessions)
     "sum_wins_last10",
     "sum_podiums_last10",
-    "sum_points_last10",
     "avg_position_last10",
     "avg_grid_last10",
+    # Qualifying pace (last 10 sessions)
+    "avg_quali_position_last10",
     # Standings context (point-in-time, available at prediction time)
     "team_standing_position",
     "team_points_pct_of_leader",
-    # Momentum
-    "team_points_accel",
-    # Interactions
-    "team_pct_leader_x_wins",
-    "team_pct_leader_x_podiums",
-    "team_pct_leader_x_points",
+    # Momentum (standings trajectory over last 3 races)
+    "team_gap_momentum_3r",
 ]
 
 
@@ -58,9 +55,17 @@ def train_team_models(skip_logreg=False, skip_boosting=False):
         experiment_name="f1_constructor_champion",
         candidates=batch_candidates,
         remove_late_rounds=False,
-        oot_year=2025,
+        oot_year=[2024, 2025],
         scoring="combined",
         feature_cols=TEAM_FEATURES,
+        keep_early_stopping=True,
+        search_space_overrides={
+            "n_estimators": (50, 300, 50),
+            "min_child_samples": (100, 300),   # LightGBM
+            "min_child_weight": (50, 200),     # XGBoost
+            "reg_alpha": (1.0, 20.0),
+            "reg_lambda": (1.0, 20.0),
+        },
     )
 
     print(f"\nDone. Best model: {best}")

@@ -234,15 +234,21 @@ def _evaluate_model(run_id, experiment_name, oot_year=None):
             "n_samples": len(y_true),
         }
 
-    # Extract feature importances
+    # Extract feature importances (tree-based) or coefficients (linear models)
     feature_importance = None
     model_step = model.named_steps.get("model") if hasattr(model, "named_steps") else None
-    if model_step is not None and hasattr(model_step, "feature_importances_"):
-        fi = model_step.feature_importances_
-        feature_importance = sorted(
-            zip(model_features, fi.tolist()),
-            key=lambda x: abs(x[1]), reverse=True,
-        )
+    if model_step is not None:
+        if hasattr(model_step, "feature_importances_"):
+            fi = model_step.feature_importances_
+        elif hasattr(model_step, "coef_"):
+            fi = np.abs(model_step.coef_.ravel())
+        else:
+            fi = None
+        if fi is not None:
+            feature_importance = sorted(
+                zip(model_features, fi.tolist()),
+                key=lambda x: abs(x[1]), reverse=True,
+            )
 
     return splits, test_year, oot_year, feature_importance
 

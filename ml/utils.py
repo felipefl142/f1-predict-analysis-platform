@@ -336,70 +336,99 @@ def cross_validate_model(pipeline, X, y, years, n_folds=N_CV_FOLDS,
 # Optuna hyperparameter tuning
 # ---------------------------------------------------------------------------
 
-def _suggest_params(trial, model_name):
-    """Define Optuna search space per model type. Returns dict of pipeline params."""
+def _suggest_params(trial, model_name, overrides=None):
+    """Define Optuna search space per model type. Returns dict of pipeline params.
+
+    Args:
+        overrides: dict mapping param names to tuples that override default ranges.
+            For int params: (low, high) or (low, high, step).
+            For float params: (low, high) — log scale preserved from defaults.
+            For categorical params: list of choices.
+    """
+    ov = overrides or {}
+
+    def _int(name, default_low, default_high, **kwargs):
+        override = ov.get(name)
+        if override:
+            low, high = override[0], override[1]
+            step = override[2] if len(override) > 2 else kwargs.get("step")
+        else:
+            low, high = default_low, default_high
+            step = kwargs.get("step")
+        kw = {"step": step} if step else {}
+        return trial.suggest_int(name, low, high, **kw)
+
+    def _float(name, default_low, default_high, **kwargs):
+        low, high = ov.get(name, (default_low, default_high))[:2]
+        return trial.suggest_float(name, low, high, **kwargs)
+
     if model_name == "LogisticRegression":
         return {
-            "model__C": trial.suggest_float("C", 1e-4, 10, log=True),
-            "model__l1_ratio": trial.suggest_float("l1_ratio", 0.2, 1.0),
+            "model__C": _float("C", 1e-4, 10, log=True),
+            "model__l1_ratio": _float("l1_ratio", 0.2, 1.0),
             "model__solver": "saga",
             "model__max_iter": 3500,
         }
     elif model_name == "BalancedRandomForest":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
-            "model__max_depth": trial.suggest_int("max_depth", 5, 20),
-            "model__min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 30),
-            "model__min_samples_split": trial.suggest_int("min_samples_split", 4, 40),
+            "model__n_estimators": _int("n_estimators", 200, 800, step=100),
+            "model__max_depth": _int("max_depth", 5, 20),
+            "model__min_samples_leaf": _int("min_samples_leaf", 2, 30),
+            "model__min_samples_split": _int("min_samples_split", 4, 40),
             "model__max_features": trial.suggest_categorical(
-                "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7],
+                "max_features", ov.get("max_features", ["sqrt", "log2", 0.3, 0.5, 0.7]),
             ),
-            "model__max_samples": trial.suggest_float("max_samples", 0.5, 1.0),
+            "model__max_samples": _float("max_samples", 0.5, 1.0),
             "model__replacement": trial.suggest_categorical("replacement", [True, False]),
         }
     elif model_name == "LightGBM":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
-            "model__num_leaves": trial.suggest_int("num_leaves", 4, 20),
-            "model__max_depth": trial.suggest_int("max_depth", 2, 5),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "model__subsample": trial.suggest_float("subsample", 0.5, 0.9),
-            "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
-            "model__reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
-            "model__reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+            "model__n_estimators": _int("n_estimators", 50, 500, step=50),
+            "model__num_leaves": _int("num_leaves", 4, 20),
+            "model__max_depth": _int("max_depth", 2, 5),
+            "model__learning_rate": _float("learning_rate", 0.005, 0.1, log=True),
+            "model__subsample": _float("subsample", 0.5, 0.9),
+            "model__colsample_bytree": _float("colsample_bytree", 0.3, 0.8),
+            "model__min_child_samples": _int("min_child_samples", 20, 100),
+            "model__reg_alpha": _float("reg_alpha", 0.01, 10.0, log=True),
+            "model__reg_lambda": _float("reg_lambda", 0.01, 10.0, log=True),
             "model__early_stopping_rounds": 30,
         }
     elif model_name == "XGBoost":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
-            "model__max_depth": trial.suggest_int("max_depth", 2, 6),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "model__subsample": trial.suggest_float("subsample", 0.5, 0.9),
-            "model__colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.8),
-            "model__min_child_weight": trial.suggest_int("min_child_weight", 5, 100),
-            "model__reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
-            "model__reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
-            "model__gamma": trial.suggest_float("gamma", 0.01, 5.0, log=True),
+            "model__n_estimators": _int("n_estimators", 50, 500, step=50),
+            "model__max_depth": _int("max_depth", 2, 6),
+            "model__learning_rate": _float("learning_rate", 0.005, 0.1, log=True),
+            "model__subsample": _float("subsample", 0.5, 0.9),
+            "model__colsample_bytree": _float("colsample_bytree", 0.3, 0.8),
+            "model__min_child_weight": _int("min_child_weight", 5, 100),
+            "model__reg_alpha": _float("reg_alpha", 0.01, 10.0, log=True),
+            "model__reg_lambda": _float("reg_lambda", 0.01, 10.0, log=True),
+            "model__gamma": _float("gamma", 0.01, 5.0, log=True),
             "model__early_stopping_rounds": 30,
         }
     elif model_name == "AdaBoost":
         return {
-            "model__n_estimators": trial.suggest_int("n_estimators", 50, 500, step=50),
-            "model__learning_rate": trial.suggest_float("learning_rate", 0.005, 1.0, log=True),
-            "model__estimator__max_depth": trial.suggest_int("max_depth", 1, 4),
+            "model__n_estimators": _int("n_estimators", 50, 500, step=50),
+            "model__learning_rate": _float("learning_rate", 0.005, 1.0, log=True),
+            "model__estimator__max_depth": _int("max_depth", 1, 4),
         }
     return {}
 
 
 def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
-                scoring="average_precision"):
+                scoring="average_precision", keep_early_stopping=False,
+                search_space_overrides=None):
     """Run Optuna Bayesian optimization with TPE sampler and median pruner.
 
     Uses ExpandingWindowCV for temporal cross-validation.
 
     Args:
         scoring: "average_precision" or "roc_auc".
+        keep_early_stopping: if True, keep early_stopping_rounds on final refit
+            (requires a held-out eval_set from the last CV fold).
+        search_space_overrides: dict of {param_name: (low, high, ...)} to override
+            default search ranges for specific parameters.
 
     Returns:
         (best_pipeline, best_params, best_cv_auc)
@@ -414,7 +443,8 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
     score_fn = _SCORE_FN[scoring]
 
     def objective(trial):
-        params = _suggest_params(trial, model_name)
+        params = _suggest_params(trial, model_name,
+                                 overrides=search_space_overrides)
         if not params:
             return 0.0
 
@@ -480,10 +510,25 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
     best_params = _suggest_params_from_dict(best_raw_params, model_name)
     best_pipeline = clone(pipeline)
     best_pipeline.set_params(**best_params)
-    # Disable early stopping for final refit on full data (no eval_set)
-    if model_name in ("XGBoost", "LightGBM"):
-        best_pipeline.set_params(model__early_stopping_rounds=None)
-    best_pipeline.fit(X, y)
+
+    if model_name in ("XGBoost", "LightGBM") and keep_early_stopping:
+        # Keep early stopping on final refit — use last CV fold as eval_set
+        cv = ExpandingWindowCV(years, n_splits=N_CV_FOLDS)
+        splits = list(cv.split(X, y))
+        train_idx, val_idx = splits[-1]
+        X_fit, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_fit, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        imputer = best_pipeline.named_steps["imputer"]
+        X_val_imp = imputer.fit_transform(X_val)
+        fit_params = {"model__eval_set": [(X_val_imp, y_val)]}
+        if model_name == "XGBoost":
+            fit_params["model__verbose"] = False
+        best_pipeline.fit(X_fit, y_fit, **fit_params)
+    else:
+        # Disable early stopping for final refit on full data (no eval_set)
+        if model_name in ("XGBoost", "LightGBM"):
+            best_pipeline.set_params(model__early_stopping_rounds=None)
+        best_pipeline.fit(X, y)
 
     return best_pipeline, best_raw_params, best_cv_auc
 
@@ -517,7 +562,9 @@ def _suggest_params_from_dict(params_dict, model_name):
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
                             oot_year=None, remove_late_rounds=True,
-                            scoring="average_precision", feature_cols=None):
+                            scoring="average_precision", feature_cols=None,
+                            keep_early_stopping=False,
+                            search_space_overrides=None):
     """Train all batch models with cross-validation and Optuna hyperparameter tuning.
 
     For each model:
@@ -577,6 +624,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                 mlflow.log_param("n_oot_rows", len(X_oot))
                 mlflow.log_param("oot_year", str(oot_years))
                 mlflow.log_param("scoring", scoring)
+                mlflow.log_param("keep_early_stopping", keep_early_stopping)
 
                 score_label = "AUC" if cv_scoring == "roc_auc" else "AP"
 
@@ -600,6 +648,8 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     years=years_train,
                     n_trials=N_OPTUNA_TRIALS,
                     scoring=cv_scoring,
+                    keep_early_stopping=keep_early_stopping,
+                    search_space_overrides=search_space_overrides,
                 )
 
                 if tuned_cv_auc > cv_mean:
@@ -607,10 +657,24 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     print(f"    Tuned CV {score_label}: {tuned_cv_auc:.4f} (improved from {cv_mean:.4f})")
                 else:
                     tuned_cv_auc = cv_mean
-                    # Disable early stopping for full fit (no eval_set)
-                    if name in ("XGBoost", "LightGBM"):
-                        pipeline.set_params(model__early_stopping_rounds=None)
-                    pipeline.fit(X_train, y_train)
+                    if name in ("XGBoost", "LightGBM") and keep_early_stopping:
+                        # Keep early stopping — use last CV fold as eval_set
+                        cv_es = ExpandingWindowCV(years_train, n_splits=N_CV_FOLDS)
+                        splits = list(cv_es.split(X_train, y_train))
+                        tr_idx, val_idx = splits[-1]
+                        X_fit, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
+                        y_fit, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
+                        imputer = pipeline.named_steps["imputer"]
+                        X_val_imp = imputer.fit_transform(X_val)
+                        fit_kw = {"model__eval_set": [(X_val_imp, y_val)]}
+                        if name == "XGBoost":
+                            fit_kw["model__verbose"] = False
+                        pipeline.fit(X_fit, y_fit, **fit_kw)
+                    else:
+                        # Disable early stopping for full fit (no eval_set)
+                        if name in ("XGBoost", "LightGBM"):
+                            pipeline.set_params(model__early_stopping_rounds=None)
+                        pipeline.fit(X_train, y_train)
                     best_params = {}
                     print(f"    Tuned CV {score_label}: {tuned_cv_auc:.4f} (kept defaults)")
 

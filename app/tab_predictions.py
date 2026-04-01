@@ -145,19 +145,29 @@ def _get_actual_champion(year, experiment_name):
 def _top1_accuracy_chart(data, id_col, actual_id, title):
     """Render a chart comparing Model's #1 Pick probability vs. Actual Champion probability."""
     # Find model's #1 pick at each race
-    top1 = data.loc[data.groupby("dt_ref")["prob_champion" if id_col=="driverid" else "prob_constructor_champion"].idxmax()].copy()
+    prob_col = "prob_champion" if id_col=="driverid" else "prob_constructor_champion"
+    top1 = data.loc[data.groupby("dt_ref")[prob_col].idxmax()].copy()
     top1 = top1.sort_values("dt_ref")
-    
+
     # Prob of actual champion
     actual_data = data[data[id_col] == actual_id].sort_values("dt_ref") if actual_id else pd.DataFrame()
 
+    # Actual standings leader (P1) at each race
+    standing_col = "standing_position" if id_col == "driverid" else "team_standing_position"
+    name_col = "full_name" if id_col == "driverid" else "team_name"
+    standings_leader = pd.DataFrame()
+    if standing_col in data.columns:
+        p1 = data[data[standing_col] == 1].copy()
+        if not p1.empty:
+            # One leader per date (take highest prob if tied)
+            standings_leader = p1.loc[p1.groupby("dt_ref")[prob_col].idxmax()].sort_values("dt_ref")
+
     fig = go.Figure()
-    
+
     all_dates = sorted(data["dt_ref"].unique())
     date_labels = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in all_dates]
 
     # Trace 1: Model's top pick
-    prob_col = "prob_champion" if id_col=="driverid" else "prob_constructor_champion"
     fig.add_trace(go.Scatter(
         x=[pd.Timestamp(d).strftime("%Y-%m-%d") for d in top1["dt_ref"]],
         y=top1[prob_col],
@@ -166,7 +176,7 @@ def _top1_accuracy_chart(data, id_col, actual_id, title):
         line=dict(color="#EF553B", width=3),
         marker=dict(size=8),
         hovertemplate="Model's #1: %{customdata}<br>Prob: %{y:.1%}<extra></extra>",
-        customdata=top1["full_name" if id_col=="driverid" else "team_name"]
+        customdata=top1[name_col]
     ))
 
     # Trace 2: Actual champion (if known)
@@ -179,6 +189,19 @@ def _top1_accuracy_chart(data, id_col, actual_id, title):
             line=dict(color="#00CC96", width=2, dash="dash"),
             marker=dict(size=6),
             hovertemplate="Actual Champ Prob: %{y:.1%}<extra></extra>"
+        ))
+
+    # Trace 3: Actual standings leader (P1)
+    if not standings_leader.empty:
+        fig.add_trace(go.Scatter(
+            x=[pd.Timestamp(d).strftime("%Y-%m-%d") for d in standings_leader["dt_ref"]],
+            y=standings_leader[prob_col],
+            mode="lines+markers",
+            name="Standings Leader (P1)",
+            line=dict(color="#FFA15A", width=2, dash="dot"),
+            marker=dict(size=6, symbol="diamond"),
+            hovertemplate="Standings P1: %{customdata}<br>Prob: %{y:.1%}<extra></extra>",
+            customdata=standings_leader[name_col]
         ))
 
     fig.update_layout(
@@ -369,7 +392,7 @@ def _render_champion_predictions():
 
     # Add Top-1 Accuracy Evolution Chart
     actual_champ = _get_actual_champion(selected_year, "f1_champion")
-    with st.expander("📊 View Top-1 Prediction Evolution", expanded=True):
+    with st.expander("📊 View Top-1 Prediction Evolution", expanded=False):
         fig_top1 = _top1_accuracy_chart(
             data, "driverid", actual_champ, 
             f"{selected_year} Model #1 Pick vs Actual Champion"
@@ -406,9 +429,6 @@ def _render_champion_predictions():
         columns={"full_name": "Driver", "prob_champion": "Win Probability"}
     ).reset_index(drop=True)
     _styled_table(display_champ, fmt={"Win Probability": "{:.2%}"})
-
-    with st.expander("Model Comparison"):
-        _render_model_comparison_table("f1_champion")
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +478,7 @@ def _render_team_predictions():
 
     # Add Top-1 Accuracy Evolution Chart
     actual_team = _get_actual_champion(selected_year, "f1_constructor_champion")
-    with st.expander("📊 View Top-1 Prediction Evolution", expanded=True):
+    with st.expander("📊 View Top-1 Prediction Evolution", expanded=False):
         fig_top1 = _top1_accuracy_chart(
             data, "teamid", actual_team, 
             f"{selected_year} Model #1 Pick vs Actual Constructor Champion"
@@ -494,9 +514,6 @@ def _render_team_predictions():
         columns={"team_name": "Team", "prob_constructor_champion": "Win Probability"}
     ).reset_index(drop=True)
     _styled_table(display_team, fmt={"Win Probability": "{:.2%}"})
-
-    with st.expander("Model Comparison"):
-        _render_model_comparison_table("f1_constructor_champion")
 
 
 # ---------------------------------------------------------------------------
@@ -590,8 +607,6 @@ def _render_departure_predictions():
     ).reset_index(drop=True)
     _styled_table(display_dep)
 
-    with st.expander("Model Comparison"):
-        _render_model_comparison_table("f1_departure")
 
 
 # ---------------------------------------------------------------------------
