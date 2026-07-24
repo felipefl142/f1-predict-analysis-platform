@@ -87,7 +87,7 @@ All tools are free and open source:
 ### Installation
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/felipefl142/f1-predict-analysis-platform
 cd f1-analytics
 pip install -r requirements.txt
 ```
