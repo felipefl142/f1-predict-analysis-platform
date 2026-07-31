@@ -467,7 +467,8 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
             elif model_name == "LightGBM":
                 imputer = cloned.named_steps["imputer"]
                 X_val_imp = imputer.fit_transform(X_fold_val)
-                fit_params["model__eval_set"] = [(X_val_imp, y_fold_val)]
+                fit_params["model__eval_X"] = X_val_imp
+                fit_params["model__eval_y"] = y_fold_val
             try:
                 cloned.fit(X_fold_train, y_fold_train, **fit_params)
             except Exception:
@@ -520,9 +521,12 @@ def optuna_tune(pipeline, X, y, model_name, years, n_trials=N_OPTUNA_TRIALS,
         y_fit, y_val = y.iloc[train_idx], y.iloc[val_idx]
         imputer = best_pipeline.named_steps["imputer"]
         X_val_imp = imputer.fit_transform(X_val)
-        fit_params = {"model__eval_set": [(X_val_imp, y_val)]}
         if model_name == "XGBoost":
-            fit_params["model__verbose"] = False
+            fit_params = {"model__eval_set": [(X_val_imp, y_val)],
+                          "model__verbose": False}
+        else:
+            # LightGBM >= 4.7 deprecated eval_set in favour of eval_X / eval_y
+            fit_params = {"model__eval_X": X_val_imp, "model__eval_y": y_val}
         best_pipeline.fit(X_fit, y_fit, **fit_params)
     else:
         # Disable early stopping for final refit on full data (no eval_set)
@@ -559,6 +563,26 @@ def _suggest_params_from_dict(params_dict, model_name):
 # ---------------------------------------------------------------------------
 # Batch training with CV + Optuna tuning
 # ---------------------------------------------------------------------------
+
+def _log_sklearn_model(pipeline, name="model"):
+    """Log a pipeline to MLflow using the skops format.
+
+    skops refuses to load non-sklearn estimators (LightGBM/XGBoost boosters,
+    imblearn samplers, feature_engine imputers) unless they are whitelisted.
+    The list is derived from the pipeline we just built in-process rather than
+    hardcoded, so it stays correct as candidate models change; skops still
+    validates at load time that the file contains nothing beyond it.
+    """
+    import skops.io as sio
+
+    trusted = sio.get_untrusted_types(data=sio.dumps(pipeline))
+    mlflow.sklearn.log_model(
+        pipeline,
+        name=name,
+        serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_SKOPS,
+        skops_trusted_types=trusted,
+    )
+
 
 def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates,
                             oot_year=None, remove_late_rounds=True,
@@ -666,9 +690,12 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                         y_fit, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
                         imputer = pipeline.named_steps["imputer"]
                         X_val_imp = imputer.fit_transform(X_val)
-                        fit_kw = {"model__eval_set": [(X_val_imp, y_val)]}
                         if name == "XGBoost":
-                            fit_kw["model__verbose"] = False
+                            fit_kw = {"model__eval_set": [(X_val_imp, y_val)],
+                                      "model__verbose": False}
+                        else:
+                            fit_kw = {"model__eval_X": X_val_imp,
+                                      "model__eval_y": y_val}
                         pipeline.fit(X_fit, y_fit, **fit_kw)
                     else:
                         # Disable early stopping for full fit (no eval_set)
@@ -726,7 +753,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
                     # Log bar chart
                     _log_feature_importance_chart(fi.head(20), name)
 
-                mlflow.sklearn.log_model(pipeline, artifact_path="model")
+                _log_sklearn_model(pipeline)
 
                 elapsed = time.time() - t_start
                 mlflow.log_metric("training_time_s", round(elapsed, 1))
@@ -755,6 +782,12 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
             continue
 
     comparison = pd.DataFrame(results)
+
+    if comparison.empty:
+        raise RuntimeError(
+            "No batch model trained successfully — every candidate raised an "
+            "error (see the SKIPPED lines above)."
+        )
 
     # Select best by OOT metric matching the scoring strategy
     if scoring == "combined":
@@ -806,7 +839,7 @@ def train_and_compare_batch(df, target_col, id_cols, experiment_name, candidates
         mlflow.log_param("model_type", f"{best_model_name}_final")
         mlflow.log_param("learning_mode", "batch")
         mlflow.log_param("trained_on", "all_data")
-        mlflow.sklearn.log_model(final_pipeline, artifact_path="model")
+        _log_sklearn_model(final_pipeline)
         mlflow.set_tag("best_model", "true")
         mlflow.set_tag("final_model", "true")
         mlflow.set_tag("learning_mode", "batch")
